@@ -536,6 +536,8 @@ int sysfs_add_file(struct sysfs_dirent *dir_sd, const struct attribute *attr,
 
 int sysfs_create_file(struct kobject * kobj, const struct attribute * attr)
 {
+	if (!ve_sysfs_alowed())
+		return 0;
 	BUG_ON(!kobj || !kobj->sd || !attr);
 
 	return sysfs_add_file(kobj->sd, attr, SYSFS_KOBJ_ATTR);
@@ -634,6 +636,8 @@ EXPORT_SYMBOL_GPL(sysfs_chmod_file);
 
 void sysfs_remove_file(struct kobject * kobj, const struct attribute * attr)
 {
+	if (!ve_sysfs_alowed())
+		return;
 	sysfs_hash_and_remove(kobj->sd, attr->name);
 }
 

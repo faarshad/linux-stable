@@ -501,8 +501,8 @@ int ip_fragment(struct sk_buff *skb, int (*output)(struct sk_buff *))
 			if (skb->sk) {
 				frag->sk = skb->sk;
 				frag->destructor = sock_wfree;
-				truesizes += frag->truesize;
 			}
+			truesizes += frag->truesize;
 		}
 
 		/* Everything is OK. Generate! */
@@ -1362,12 +1362,13 @@ void ip_send_reply(struct sock *sk, struct sk_buff *skb, struct ip_reply_arg *ar
 		char			data[40];
 	} replyopts;
 	struct ipcm_cookie ipc;
-	__be32 daddr;
+	__be32 saddr, daddr;
 	struct rtable *rt = skb_rtable(skb);
 
 	if (ip_options_echo(&replyopts.opt, skb))
 		return;
 
+	saddr = ip_hdr(skb)->daddr;
 	daddr = ipc.addr = rt->rt_src;
 	ipc.opt = NULL;
 	ipc.shtx.flags = 0;
@@ -1383,7 +1384,7 @@ void ip_send_reply(struct sock *sk, struct sk_buff *skb, struct ip_reply_arg *ar
 		struct flowi fl = { .oif = arg->bound_dev_if,
 				    .nl_u = { .ip4_u =
 					      { .daddr = daddr,
-						.saddr = rt->rt_spec_dst,
+						.saddr = saddr,
 						.tos = RT_TOS(ip_hdr(skb)->tos) } },
 				    /* Not quite clean, but right. */
 				    .uli_u = { .ports =

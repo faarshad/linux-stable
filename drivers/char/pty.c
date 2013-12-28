@@ -30,16 +30,22 @@
 #include <linux/bitops.h>
 #include <linux/devpts_fs.h>
 
+#include <bc/misc.h>
+
 #include <asm/system.h>
 
 #ifdef CONFIG_UNIX98_PTYS
-static struct tty_driver *ptm_driver;
-static struct tty_driver *pts_driver;
+struct tty_driver *ptm_driver;
+struct tty_driver *pts_driver;
+EXPORT_SYMBOL(ptm_driver);
+EXPORT_SYMBOL(pts_driver);
 #endif
 
 static void pty_close(struct tty_struct *tty, struct file *filp)
 {
 	BUG_ON(!tty);
+
+	ub_pty_uncharge(tty);
 	if (tty->driver->subtype == PTY_TYPE_MASTER)
 		WARN_ON(tty->count > 1);
 	else {
@@ -58,8 +64,12 @@ static void pty_close(struct tty_struct *tty, struct file *filp)
 	if (tty->driver->subtype == PTY_TYPE_MASTER) {
 		set_bit(TTY_OTHER_CLOSED, &tty->flags);
 #ifdef CONFIG_UNIX98_PTYS
-		if (tty->driver == ptm_driver)
+		if (tty->driver->flags & TTY_DRIVER_DEVPTS_MEM) {
+			struct ve_struct *old_env;
+			old_env = set_exec_env(tty->owner_env);
 			devpts_pty_kill(tty->link);
+			(void)set_exec_env(old_env);
+		}
 #endif
 		tty_vhangup(tty->link);
 	}
@@ -199,6 +209,10 @@ static int pty_open(struct tty_struct *tty, struct file *filp)
 	if (test_bit(TTY_PTY_LOCK, &tty->link->flags))
 		goto out;
 	if (tty->link->count != 1)
+		goto out;
+
+	retval = -ENOMEM;
+	if (ub_pty_charge(tty))
 		goto out;
 
 	clear_bit(TTY_OTHER_CLOSED, &tty->link->flags);
@@ -358,9 +372,12 @@ static const struct tty_operations slave_pty_ops_bsd = {
 	.resize = pty_resize
 };
 
+struct tty_driver *pty_driver, *pty_slave_driver;
+EXPORT_SYMBOL(pty_driver);
+EXPORT_SYMBOL(pty_slave_driver);
+
 static void __init legacy_pty_init(void)
 {
-	struct tty_driver *pty_driver, *pty_slave_driver;
 
 	if (legacy_count <= 0)
 		return;
@@ -645,7 +662,7 @@ static int __ptmx_open(struct inode *inode, struct file *filp)
 		return index;
 
 	mutex_lock(&tty_mutex);
-	tty = tty_init_dev(ptm_driver, index, 1);
+	tty = tty_init_dev(get_exec_env()->ptm_driver, index, NULL, 1);
 	mutex_unlock(&tty_mutex);
 
 	if (IS_ERR(tty)) {
@@ -661,7 +678,7 @@ static int __ptmx_open(struct inode *inode, struct file *filp)
 	if (retval)
 		goto out1;
 
-	retval = ptm_driver->ops->open(tty, filp);
+	retval = get_exec_env()->ptm_driver->ops->open(tty, filp);
 	if (!retval)
 		return 0;
 out1:
@@ -744,6 +761,9 @@ static void __init unix98_pty_init(void)
 	    register_chrdev_region(MKDEV(TTYAUX_MAJOR, 2), 1, "/dev/ptmx") < 0)
 		panic("Couldn't register /dev/ptmx driver\n");
 	device_create(tty_class, NULL, MKDEV(TTYAUX_MAJOR, 2), NULL, "ptmx");
+#ifdef CONFIG_VE
+	get_ve0()->ptm_driver = ptm_driver;
+#endif
 }
 
 #else

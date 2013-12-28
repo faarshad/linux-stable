@@ -15,6 +15,8 @@
 #include <linux/buffer_head.h>
 #include "internal.h"
 
+#include <bc/beancounter.h>
+
 #define VALID_FLAGS (SYNC_FILE_RANGE_WAIT_BEFORE|SYNC_FILE_RANGE_WRITE| \
 			SYNC_FILE_RANGE_WAIT_AFTER)
 
@@ -127,11 +129,18 @@ restart:
  */
 SYSCALL_DEFINE0(sync)
 {
+	struct user_beancounter *ub;
+
+	ub = get_exec_ub();
+	ub_percpu_inc(ub, sync);
+
 	wakeup_flusher_threads(0);
 	sync_filesystems(0);
 	sync_filesystems(1);
 	if (unlikely(laptop_mode))
 		laptop_sync_completion();
+
+	ub_percpu_inc(ub, sync_done);
 	return 0;
 }
 
@@ -207,6 +216,7 @@ int vfs_fsync_range(struct file *file, struct dentry *dentry, loff_t start,
 	const struct file_operations *fop;
 	struct address_space *mapping;
 	int err, ret;
+	struct user_beancounter *ub;
 
 	/*
 	 * Get mapping and operations from the file in case we have
@@ -226,6 +236,12 @@ int vfs_fsync_range(struct file *file, struct dentry *dentry, loff_t start,
 		goto out;
 	}
 
+	ub = get_exec_ub();
+	if (datasync)
+		ub_percpu_inc(ub, fdsync);
+	else
+		ub_percpu_inc(ub, fsync);
+
 	ret = filemap_write_and_wait_range(mapping, start, end);
 
 	/*
@@ -238,6 +254,10 @@ int vfs_fsync_range(struct file *file, struct dentry *dentry, loff_t start,
 		ret = err;
 	mutex_unlock(&mapping->host->i_mutex);
 
+	if (datasync)
+		ub_percpu_inc(ub, fdsync_done);
+	else
+		ub_percpu_inc(ub, fsync_done);
 out:
 	return ret;
 }
@@ -444,11 +464,15 @@ int do_sync_mapping_range(struct address_space *mapping, loff_t offset,
 			  loff_t endbyte, unsigned int flags)
 {
 	int ret;
+	struct user_beancounter *ub;
 
 	if (!mapping) {
 		ret = -EINVAL;
-		goto out;
+		goto out_noacct;
 	}
+
+	ub = get_exec_ub();
+	ub_percpu_inc(ub, frsync);
 
 	ret = 0;
 	if (flags & SYNC_FILE_RANGE_WAIT_BEFORE) {
@@ -472,6 +496,8 @@ int do_sync_mapping_range(struct address_space *mapping, loff_t offset,
 					endbyte >> PAGE_CACHE_SHIFT);
 	}
 out:
+	ub_percpu_inc(ub, frsync_done);
+out_noacct:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(do_sync_mapping_range);

@@ -31,6 +31,7 @@ enum {
 } input_mode = ask_all;
 char *defconfig_file;
 
+static int dont_ask = -1;
 static int indent = 1;
 static int valid_stdin = 1;
 static int sync_kconfig;
@@ -98,6 +99,10 @@ static int conf_askvalue(struct symbol *sym, const char *def)
 		if (sym_has_value(sym)) {
 			printf("%s\n", def);
 			return 0;
+		}
+		if (dont_ask >= 0) {
+			dont_ask++;
+			break;
 		}
 		check_stdin();
 	case ask_all:
@@ -301,6 +306,10 @@ static int conf_choice(struct menu *menu)
 				printf("%d\n", cnt);
 				break;
 			}
+			if (dont_ask >= 0) {
+				dont_ask++;
+				break;
+			}
 			check_stdin();
 		case ask_all:
 			fflush(stdout);
@@ -439,8 +448,10 @@ int main(int ac, char **av)
 	bindtextdomain(PACKAGE, LOCALEDIR);
 	textdomain(PACKAGE);
 
-	while ((opt = getopt(ac, av, "osdD:nmyrh")) != -1) {
+	while ((opt = getopt(ac, av, "obsdD:nmyrh")) != -1) {
 		switch (opt) {
+		case 'b':
+			dont_ask = 0;
 		case 'o':
 			input_mode = ask_silent;
 			break;
@@ -613,5 +624,5 @@ int main(int ac, char **av)
 			exit(1);
 		}
 	}
-	return 0;
+	return (dont_ask > 0) ? 1 : 0;
 }

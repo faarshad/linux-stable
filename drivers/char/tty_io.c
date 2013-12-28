@@ -96,6 +96,8 @@
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/seq_file.h>
+#include <linux/nsproxy.h>
+#include <linux/ve.h>
 
 #include <linux/uaccess.h>
 #include <asm/system.h>
@@ -106,6 +108,7 @@
 
 #include <linux/kmod.h>
 #include <linux/nsproxy.h>
+#include <bc/kmem.h>
 
 #undef TTY_DEBUG_HANGUP
 
@@ -130,6 +133,7 @@ EXPORT_SYMBOL(tty_std_termios);
    into this file */
 
 LIST_HEAD(tty_drivers);			/* linked list of tty drivers */
+EXPORT_SYMBOL(tty_drivers);
 
 /* Mutex to protect creating and releasing a tty. This is shared with
    vt.c for deeply disgusting hack reasons */
@@ -166,7 +170,7 @@ static void proc_set_tty(struct task_struct *tsk, struct tty_struct *tty);
 
 struct tty_struct *alloc_tty_struct(void)
 {
-	return kzalloc(sizeof(struct tty_struct), GFP_KERNEL);
+	return kzalloc(sizeof(struct tty_struct), GFP_KERNEL_UBC);
 }
 
 /**
@@ -274,9 +278,29 @@ static struct tty_driver *get_tty_driver(dev_t device, int *index)
 		if (device < base || device >= base + p->num)
 			continue;
 		*index = device - base;
-		return tty_driver_kref_get(p);
+#ifdef CONFIG_VE
+		if (in_interrupt())
+			goto found;
+		if (p->major!=PTY_MASTER_MAJOR && p->major!=PTY_SLAVE_MAJOR
+#ifdef CONFIG_UNIX98_PTYS
+		    && (p->major<UNIX98_PTY_MASTER_MAJOR ||
+		    	p->major>UNIX98_PTY_MASTER_MAJOR+UNIX98_PTY_MAJOR_COUNT-1) &&
+		       (p->major<UNIX98_PTY_SLAVE_MAJOR ||
+		        p->major>UNIX98_PTY_SLAVE_MAJOR+UNIX98_PTY_MAJOR_COUNT-1)
+#endif
+		)
+			goto found;
+		if (ve_is_super(p->owner_env) && ve_is_super(get_exec_env()))
+			goto found;
+		if (!ve_accessible_strict(p->owner_env, get_exec_env()))
+			continue;
+#endif
+		goto found;
 	}
 	return NULL;
+
+found:
+	return tty_driver_kref_get(p);
 }
 
 #ifdef CONFIG_CONSOLE_POLL
@@ -1169,7 +1193,7 @@ int tty_init_termios(struct tty_struct *tty)
 
 	tp = tty->driver->termios[idx];
 	if (tp == NULL) {
-		tp = kzalloc(sizeof(struct ktermios[2]), GFP_KERNEL);
+		tp = kzalloc(sizeof(struct ktermios[2]), GFP_KERNEL_UBC);
 		if (tp == NULL)
 			return -ENOMEM;
 		memcpy(tp, &tty->driver->init_termios,
@@ -1297,7 +1321,7 @@ static int tty_reopen(struct tty_struct *tty)
  */
 
 struct tty_struct *tty_init_dev(struct tty_driver *driver, int idx,
-								int first_ok)
+					struct tty_struct *i_tty, int first_ok)
 {
 	struct tty_struct *tty;
 	int retval;
@@ -1705,7 +1729,7 @@ void tty_release_dev(struct file *filp)
 
 static int __tty_open(struct inode *inode, struct file *filp)
 {
-	struct tty_struct *tty = NULL;
+	struct tty_struct *tty = NULL, *c_tty = NULL;
 	int noctty, retval;
 	struct tty_driver *driver;
 	int index;
@@ -1729,6 +1753,7 @@ retry_open:
 		}
 		driver = tty_driver_kref_get(tty->driver);
 		index = tty->index;
+		c_tty = tty;
 		filp->f_flags |= O_NONBLOCK; /* Don't let /dev/tty block */
 		/* noctty = 1; */
 		/* FIXME: Should we take a driver reference ? */
@@ -1738,6 +1763,12 @@ retry_open:
 #ifdef CONFIG_VT
 	if (device == MKDEV(TTY_MAJOR, 0)) {
 		extern struct tty_driver *console_driver;
+#ifdef CONFIG_VE
+		if (!ve_is_super(get_exec_env())) {
+			mutex_unlock(&tty_mutex);
+			return -ENODEV;
+		}
+#endif
 		driver = tty_driver_kref_get(console_driver);
 		index = fg_console;
 		noctty = 1;
@@ -1746,6 +1777,12 @@ retry_open:
 #endif
 	if (device == MKDEV(TTYAUX_MAJOR, 1)) {
 		struct tty_driver *console_driver = console_device(&index);
+#ifdef CONFIG_VE
+		if (!ve_is_super(get_exec_env())) {
+			mutex_unlock(&tty_mutex);
+			return -ENODEV;
+		}
+#endif
 		if (console_driver) {
 			driver = tty_driver_kref_get(console_driver);
 			if (driver) {
@@ -1780,7 +1817,7 @@ got_driver:
 		if (retval)
 			tty = ERR_PTR(retval);
 	} else
-		tty = tty_init_dev(driver, index, 0);
+		tty = tty_init_dev(driver, index, c_tty, 0);
 
 	mutex_unlock(&tty_mutex);
 	tty_driver_kref_put(driver);
@@ -1930,8 +1967,10 @@ static int tty_fasync(int fd, struct file *filp, int on)
 			pid = task_pid(current);
 			type = PIDTYPE_PID;
 		}
+		get_pid(pid);
 		spin_unlock_irqrestore(&tty->ctrl_lock, flags);
 		retval = __f_setown(filp, pid, type, 0);
+		put_pid(pid);
 		if (retval)
 			goto out;
 	} else {
@@ -2074,6 +2113,8 @@ static int tioccons(struct file *file)
 {
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
+	if (!ve_is_super(get_exec_env()))
+		return -EACCES;
 	if (file->f_op->write == redirected_tty_write) {
 		struct file *f;
 		spin_lock(&redirect_lock);
@@ -2654,7 +2695,7 @@ void __do_SAK(struct tty_struct *tty)
 	/* Now kill any processes that happen to have the
 	 * tty open.
 	 */
-	do_each_thread(g, p) {
+	do_each_thread_all(g, p) {
 		if (p->signal->tty == tty) {
 			printk(KERN_NOTICE "SAK: killed process %d"
 			    " (%s): task_session(p)==tty->session\n",
@@ -2686,7 +2727,7 @@ void __do_SAK(struct tty_struct *tty)
 			spin_unlock(&p->files->file_lock);
 		}
 		task_unlock(p);
-	} while_each_thread(g, p);
+	} while_each_thread_all(g, p);
 	read_unlock(&tasklist_lock);
 #endif
 }
@@ -2753,6 +2794,7 @@ void initialize_tty_struct(struct tty_struct *tty,
 	tty->ops = driver->ops;
 	tty->index = idx;
 	tty_line_name(driver, idx, tty->name);
+	tty->owner_env = driver->owner_env;
 }
 
 /**
@@ -2845,6 +2887,7 @@ struct tty_driver *alloc_tty_driver(int lines)
 		driver->magic = TTY_DRIVER_MAGIC;
 		driver->num = lines;
 		/* later we'll move allocation of tables here */
+		driver->owner_env = get_ve(get_exec_env());
 	}
 	return driver;
 }
@@ -2879,6 +2922,7 @@ static void destruct_tty_driver(struct kref *kref)
 		kfree(p);
 		cdev_del(&driver->cdev);
 	}
+	put_ve(driver->owner_env);
 	kfree(driver);
 }
 
@@ -2953,6 +2997,7 @@ int tty_register_driver(struct tty_driver *driver)
 	}
 
 	mutex_lock(&tty_mutex);
+	driver->owner_env = get_exec_env();
 	list_add(&driver->tty_drivers, &tty_drivers);
 	mutex_unlock(&tty_mutex);
 
@@ -3126,3 +3171,43 @@ static int __init tty_init(void)
 	return 0;
 }
 module_init(tty_init);
+
+#ifdef CONFIG_UNIX98_PTYS
+int init_ve_tty_class(void)
+{
+	struct class * ve_tty_class;
+	struct device * ve_ptmx_dev_class;
+
+	ve_tty_class = class_create(THIS_MODULE, "tty");
+	if (IS_ERR(ve_tty_class))
+		return -ENOMEM;
+
+	ve_ptmx_dev_class = device_create(ve_tty_class, NULL,
+				MKDEV(TTYAUX_MAJOR, 2), NULL, "ptmx");
+	if (IS_ERR(ve_ptmx_dev_class)) {
+		class_destroy(ve_tty_class);
+		return PTR_ERR(ve_ptmx_dev_class);
+	}
+
+	get_exec_env()->tty_class = ve_tty_class;
+	return 0;
+}
+
+void fini_ve_tty_class(void)
+{
+	struct class *ve_tty_class = get_exec_env()->tty_class;
+
+	device_destroy(ve_tty_class, MKDEV(TTYAUX_MAJOR, 2));
+	class_destroy(ve_tty_class);
+}
+#else
+int init_ve_tty_class(void)
+{
+	return 0;
+}
+void fini_ve_tty_class(void)
+{
+}
+#endif
+EXPORT_SYMBOL(init_ve_tty_class);
+EXPORT_SYMBOL(fini_ve_tty_class);

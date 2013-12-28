@@ -150,6 +150,10 @@ void __cpuinit check_tsc_sync_source(int cpu)
 		printk(" passed.\n");
 	}
 
+#ifdef CONFIG_VE
+	/* TSC reset. kill whatever might rely on old values */
+	VE_TASK_INFO(current)->wakeup_stamp = 0;
+#endif
 	/*
 	 * Reset it - just in case we boot another CPU later:
 	 */

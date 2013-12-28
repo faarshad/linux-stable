@@ -24,6 +24,14 @@
 #define RPC_MAX_SLOT_TABLE	(128U)
 
 /*
+ * Grand abort timeout (stop the client if occures)
+ */
+extern int xprt_abort_timeout;
+
+#define RPC_MIN_ABORT_TIMEOUT	300
+#define RPC_MAX_ABORT_TIMEOUT	INT_MAX
+
+/*
  * This describes a timeout strategy
  */
 struct rpc_timeout {
@@ -144,6 +152,7 @@ enum xprt_transports {
 struct rpc_xprt {
 	struct kref		kref;		/* Reference count */
 	struct rpc_xprt_ops *	ops;		/* transport methods */
+	struct ve_struct *	owner_env;	/* VE owner of mount */
 
 	const struct rpc_timeout *timeout;	/* timeout parms */
 	struct sockaddr_storage	addr;		/* server address */

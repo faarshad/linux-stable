@@ -257,6 +257,19 @@ static inline void vfs_dq_free_inode(struct inode *inode)
 		inode->i_sb->dq_op->free_inode(inode, 1);
 }
 
+static __inline__ int vfs_dq_rename(struct inode *inode,
+		struct inode *old_dir, struct inode *new_dir)
+{
+	const struct dquot_operations *q_op;
+
+	q_op = inode->i_sb->dq_op;
+	if (q_op && q_op->rename) {
+		if (q_op->rename(inode, old_dir, new_dir) == NO_QUOTA)
+			return 1;
+	}
+	return 0;
+}
+
 /* Cannot be called inside a transaction */
 static inline int vfs_dq_off(struct super_block *sb, int remount)
 {
@@ -352,6 +365,12 @@ static inline int vfs_dq_quota_on_remount(struct super_block *sb)
 }
 
 static inline int vfs_dq_transfer(struct inode *inode, struct iattr *iattr)
+{
+	return 0;
+}
+
+static inline int vfs_dq_rename(struct inode *inode, struct inode *old_dir,
+		struct inode *new_dir)
 {
 	return 0;
 }

@@ -15,6 +15,8 @@
 #include <linux/syscalls.h>
 #include <linux/freezer.h>
 
+atomic_t global_suspend = ATOMIC_INIT(0);
+
 /* 
  * Timeout for stopping processes
  */
@@ -24,7 +26,9 @@ static inline int freezeable(struct task_struct * p)
 {
 	if ((p == current) ||
 	    (p->flags & PF_NOFREEZE) ||
-	    (p->exit_state != 0))
+	    (p->exit_state != 0) ||
+	    (p->state == TASK_STOPPED) ||
+	    (p->state == TASK_TRACED))
 		return 0;
 	return 1;
 }
@@ -44,7 +48,7 @@ static int try_to_freeze_tasks(bool sig_only)
 	do {
 		todo = 0;
 		read_lock(&tasklist_lock);
-		do_each_thread(g, p) {
+		do_each_thread_all(g, p) {
 			if (frozen(p) || !freezeable(p))
 				continue;
 
@@ -60,7 +64,7 @@ static int try_to_freeze_tasks(bool sig_only)
 			if (!task_is_stopped_or_traced(p) &&
 			    !freezer_should_skip(p))
 				todo++;
-		} while_each_thread(g, p);
+		} while_each_thread_all(g, p);
 		read_unlock(&tasklist_lock);
 		yield();			/* Yield is okay here */
 		if (time_after(jiffies, end_time))
@@ -84,13 +88,13 @@ static int try_to_freeze_tasks(bool sig_only)
 				elapsed_csecs / 100, elapsed_csecs % 100, todo);
 		show_state();
 		read_lock(&tasklist_lock);
-		do_each_thread(g, p) {
+		do_each_thread_all(g, p) {
 			task_lock(p);
 			if (freezing(p) && !freezer_should_skip(p))
 				printk(KERN_ERR " %s\n", p->comm);
 			cancel_freezing(p);
 			task_unlock(p);
-		} while_each_thread(g, p);
+		} while_each_thread_all(g, p);
 		read_unlock(&tasklist_lock);
 	} else {
 		printk("(elapsed %d.%02d seconds) ", elapsed_csecs / 100,
@@ -107,6 +111,7 @@ int freeze_processes(void)
 {
 	int error;
 
+	atomic_inc(&global_suspend);
 	printk("Freezing user space processes ... ");
 	error = try_to_freeze_tasks(true);
 	if (error)
@@ -123,6 +128,7 @@ int freeze_processes(void)
  Exit:
 	BUG_ON(in_atomic());
 	printk("\n");
+	atomic_dec(&global_suspend);
 
 	return error;
 }
@@ -132,7 +138,7 @@ static void thaw_tasks(bool nosig_only)
 	struct task_struct *g, *p;
 
 	read_lock(&tasklist_lock);
-	do_each_thread(g, p) {
+	do_each_thread_all(g, p) {
 		if (!freezeable(p))
 			continue;
 
@@ -142,8 +148,10 @@ static void thaw_tasks(bool nosig_only)
 		if (cgroup_frozen(p))
 			continue;
 
-		thaw_process(p);
-	} while_each_thread(g, p);
+		if (!thaw_process(p))
+			printk(KERN_WARNING " Strange, %s not stopped\n",
+				p->comm );
+	} while_each_thread_all(g, p);
 	read_unlock(&tasklist_lock);
 }
 

@@ -40,27 +40,17 @@
 #include <linux/mount.h>
 #include <linux/ipc_namespace.h>
 #include <linux/ima.h>
+#include <linux/shmem_fs.h>
 
 #include <asm/uaccess.h>
 
+#include <bc/beancounter.h>
+#include <bc/vmpages.h>
+
 #include "util.h"
 
-struct shm_file_data {
-	int id;
-	struct ipc_namespace *ns;
-	struct file *file;
-	const struct vm_operations_struct *vm_ops;
-};
-
-#define shm_file_data(file) (*((struct shm_file_data **)&(file)->private_data))
-
-static const struct file_operations shm_file_operations;
 static const struct vm_operations_struct shm_vm_ops;
 
-#define shm_ids(ns)	((ns)->ids[IPC_SHM_IDS])
-
-#define shm_unlock(shp)			\
-	ipc_unlock(&(shp)->shm_perm)
 
 static int newseg(struct ipc_namespace *, struct ipc_params *);
 static void shm_open(struct vm_area_struct *vma);
@@ -101,6 +91,7 @@ static void do_shm_rmid(struct ipc_namespace *ns, struct kern_ipc_perm *ipcp)
 void shm_exit_ns(struct ipc_namespace *ns)
 {
 	free_ipcs(ns, &shm_ids(ns), do_shm_rmid);
+	idr_destroy(&ns->ids[IPC_SHM_IDS].ipcs_idr);
 }
 #endif
 
@@ -110,20 +101,6 @@ void __init shm_init (void)
 	ipc_init_proc_interface("sysvipc/shm",
 				"       key      shmid perms       size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime\n",
 				IPC_SHM_IDS, sysvipc_shm_proc_show);
-}
-
-/*
- * shm_lock_(check_) routines are called in the paths where the rw_mutex
- * is not necessarily held.
- */
-static inline struct shmid_kernel *shm_lock(struct ipc_namespace *ns, int id)
-{
-	struct kern_ipc_perm *ipcp = ipc_lock(&shm_ids(ns), id);
-
-	if (IS_ERR(ipcp))
-		return (struct shmid_kernel *)ipcp;
-
-	return container_of(ipcp, struct shmid_kernel, shm_perm);
 }
 
 static inline struct shmid_kernel *shm_lock_check(struct ipc_namespace *ns,
@@ -290,27 +267,28 @@ static unsigned long shm_get_unmapped_area(struct file *file,
 	unsigned long flags)
 {
 	struct shm_file_data *sfd = shm_file_data(file);
-	return get_unmapped_area(sfd->file, addr, len, pgoff, flags);
+	return sfd->file->f_op->get_unmapped_area(sfd->file, addr, len,
+						pgoff, flags);
 }
 
-int is_file_shm_hugepages(struct file *file)
-{
-	int ret = 0;
+const struct file_operations shm_file_operations = {
+	.mmap		= shm_mmap,
+	.fsync		= shm_fsync,
+	.release	= shm_release,
+};
 
-	if (file->f_op == &shm_file_operations) {
-		struct shm_file_data *sfd;
-		sfd = shm_file_data(file);
-		ret = is_file_hugepages(sfd->file);
-	}
-	return ret;
-}
-
-static const struct file_operations shm_file_operations = {
+static const struct file_operations shm_file_operations_huge = {
 	.mmap		= shm_mmap,
 	.fsync		= shm_fsync,
 	.release	= shm_release,
 	.get_unmapped_area	= shm_get_unmapped_area,
 };
+EXPORT_SYMBOL_GPL(shm_file_operations);
+
+int is_file_shm_hugepages(struct file *file)
+{
+	return file->f_op == &shm_file_operations_huge;
+}
 
 static const struct vm_operations_struct shm_vm_ops = {
 	.open	= shm_open,	/* callback for a new vm-area open */
@@ -335,11 +313,12 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 	key_t key = params->key;
 	int shmflg = params->flg;
 	size_t size = params->u.size;
+	int shmid = params->id;
 	int error;
 	struct shmid_kernel *shp;
 	int numpages = (size + PAGE_SIZE -1) >> PAGE_SHIFT;
 	struct file * file;
-	char name[13];
+	char name[64];
 	int id;
 	int acctflag = 0;
 
@@ -364,7 +343,7 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 		return error;
 	}
 
-	sprintf (name, "SYSV%08x", key);
+	snprintf (name, sizeof(name), "VE%d-SYSV%08x", VEID(get_exec_env()), key);
 	if (shmflg & SHM_HUGETLB) {
 		/* hugetlb_file_setup applies strict accounting */
 		if (shmflg & SHM_NORESERVE)
@@ -385,7 +364,7 @@ static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
 	if (IS_ERR(file))
 		goto no_file;
 
-	id = ipc_addid(&shm_ids(ns), &shp->shm_perm, ns->shm_ctlmni);
+	id = ipc_addid(&shm_ids(ns), &shp->shm_perm, ns->shm_ctlmni, shmid);
 	if (id < 0) {
 		error = id;
 		goto no_id;
@@ -460,6 +439,7 @@ SYSCALL_DEFINE3(shmget, key_t, key, size_t, size, int, shmflg)
 	shm_params.key = key;
 	shm_params.flg = shmflg;
 	shm_params.u.size = size;
+	shm_params.id = -1;
 
 	return ipcget(ns, &shm_ids(ns), &shm_ops, &shm_params);
 }
@@ -889,7 +869,10 @@ long do_shmat(int shmid, char __user *shmaddr, int shmflg, ulong *raddr)
 	if (!sfd)
 		goto out_put_dentry;
 
-	file = alloc_file(path.mnt, path.dentry, f_mode, &shm_file_operations);
+	file = alloc_file(path.mnt, path.dentry, f_mode,
+			is_file_hugepages(shp->shm_file) ?
+				&shm_file_operations_huge :
+				&shm_file_operations);
 	if (!file)
 		goto out_free;
 	ima_counts_get(file);
@@ -1094,4 +1077,68 @@ static int sysvipc_shm_proc_show(struct seq_file *s, void *it)
 			  shp->shm_dtim,
 			  shp->shm_ctim);
 }
+#endif
+
+#ifdef CONFIG_VE
+#include <linux/module.h>
+
+struct file * sysvipc_setup_shm(key_t key, int shmid, size_t size, int shmflg)
+{
+	struct ipc_namespace *ns;
+	struct ipc_ops shm_ops;
+	struct ipc_params shm_params;
+	struct shmid_kernel *shp;
+	struct file *file;
+	int rv;
+
+	ns = current->nsproxy->ipc_ns;
+
+	shm_ops.getnew = newseg;
+	shm_ops.associate = shm_security;
+	shm_ops.more_checks = shm_more_checks;
+
+	shm_params.key = key;
+	shm_params.flg = shmflg | IPC_CREAT;
+	shm_params.u.size = size;
+	shm_params.id = shmid;
+
+	rv = ipcget(ns, &shm_ids(ns), &shm_ops, &shm_params);
+	if (rv < 0)
+		return ERR_PTR(rv);
+	shp = shm_lock(ns, rv);
+	BUG_ON(IS_ERR(shp));
+	file = shp->shm_file;
+	get_file(file);
+	shm_unlock(shp);
+	return file;
+}
+EXPORT_SYMBOL_GPL(sysvipc_setup_shm);
+
+int sysvipc_walk_shm(int (*func)(struct shmid_kernel*, void *), void *arg)
+{
+	int err = 0;
+	struct shmid_kernel* shp;
+	struct ipc_namespace *ns;
+	int next_id;
+	int total, in_use;
+
+	ns = current->nsproxy->ipc_ns;
+
+	down_write(&shm_ids(ns).rw_mutex);
+	in_use = shm_ids(ns).in_use;
+	for (total = 0, next_id = 0; total < in_use; next_id++) {
+		shp = idr_find(&shm_ids(ns).ipcs_idr, next_id);
+		if (shp == NULL)
+			continue;
+		ipc_lock_by_ptr(&shp->shm_perm);
+		err = func(shp, arg);
+		shm_unlock(shp);
+		if (err)
+			break;
+		total++;
+	}
+	up_write(&shm_ids(ns).rw_mutex);
+	return err;
+}
+EXPORT_SYMBOL_GPL(sysvipc_walk_shm);
 #endif

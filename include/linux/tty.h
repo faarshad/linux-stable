@@ -302,6 +302,7 @@ struct tty_struct {
 	/* If the tty has a pending do_SAK, queue it here - akpm */
 	struct work_struct SAK_work;
 	struct tty_port *port;
+	struct ve_struct *owner_env;
 };
 
 /* tty magic number */
@@ -333,6 +334,7 @@ struct tty_struct {
 #define TTY_HUPPED 		18	/* Post driver->hangup() */
 #define TTY_FLUSHING		19	/* Flushing to ldisc in progress */
 #define TTY_FLUSHPENDING	20	/* Queued buffer flush pending */
+#define TTY_CHARGED		21	/* Charged as ub resource */
 
 #define TTY_WRITE_FLUSH(tty) tty_write_flush((tty))
 
@@ -438,7 +440,7 @@ extern void free_tty_struct(struct tty_struct *tty);
 extern void initialize_tty_struct(struct tty_struct *tty,
 		struct tty_driver *driver, int idx);
 extern struct tty_struct *tty_init_dev(struct tty_driver *driver, int idx,
-								int first_ok);
+		struct tty_struct *i_tty, int first_ok);
 extern void tty_release_dev(struct file *filp);
 extern int tty_init_termios(struct tty_struct *tty);
 

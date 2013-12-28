@@ -128,14 +128,14 @@ static int __kprobes check_safety(void)
 	ret = freeze_processes();
 	if (ret == 0) {
 		struct task_struct *p, *q;
-		do_each_thread(p, q) {
+		do_each_thread_all(p, q) {
 			if (p != current && p->state == TASK_RUNNING &&
 			    p->pid != 0) {
 				printk("Check failed: %s is running\n",p->comm);
 				ret = -1;
 				goto loop_end;
 			}
-		} while_each_thread(p, q);
+		} while_each_thread_all(p, q);
 	}
 loop_end:
 	thaw_processes();

@@ -11,6 +11,7 @@
 #include <linux/user_namespace.h>
 #include <linux/securebits.h>
 #include <net/net_namespace.h>
+#include <linux/fairsched.h>
 
 extern struct files_struct init_files;
 extern struct fs_struct init_fs;
@@ -31,10 +32,17 @@ extern struct fs_struct init_fs;
 	},								\
 }
 
+#ifdef CONFIG_VE
+/* one for ve0, one for init_task */
+#define INIT_NSPROXY_COUNT	ATOMIC_INIT(2)
+#else
+#define INIT_NSPROXY_COUNT	ATOMIC_INIT(1)
+#endif
+
 extern struct nsproxy init_nsproxy;
 #define INIT_NSPROXY(nsproxy) {						\
 	.pid_ns		= &init_pid_ns,					\
-	.count		= ATOMIC_INIT(1),				\
+	.count		= INIT_NSPROXY_COUNT,				\
 	.uts_ns		= &init_uts_ns,					\
 	.mnt_ns		= NULL,						\
 	INIT_NET_NS(net_ns)                                             \
@@ -184,6 +192,7 @@ extern struct cred init_cred;
 	INIT_FTRACE_GRAPH						\
 	INIT_TRACE_RECURSION						\
 	INIT_TASK_RCU_PREEMPT(tsk)					\
+	INIT_VZ_FAIRSCHED						\
 }
 
 

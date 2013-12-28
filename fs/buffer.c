@@ -671,14 +671,18 @@ EXPORT_SYMBOL(mark_buffer_dirty_inode);
 static void __set_page_dirty(struct page *page,
 		struct address_space *mapping, int warn)
 {
+	int acct = 0;
+
 	spin_lock_irq(&mapping->tree_lock);
 	if (page->mapping) {	/* Race with truncate? */
 		WARN_ON_ONCE(warn && !PageUptodate(page));
-		account_page_dirtied(page, mapping);
+		acct = account_page_dirtied(page, mapping);
 		radix_tree_tag_set(&mapping->page_tree,
 				page_index(page), PAGECACHE_TAG_DIRTY);
 	}
 	spin_unlock_irq(&mapping->tree_lock);
+	if (acct)
+		task_io_account_write(page, PAGE_CACHE_SIZE, 0);
 	__mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
 }
 

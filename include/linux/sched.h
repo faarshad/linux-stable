@@ -94,6 +94,8 @@ struct sched_param {
 
 #include <asm/processor.h>
 
+#include <bc/task.h>
+
 struct exec_domain;
 struct futex_pi_state;
 struct robust_list_head;
@@ -120,6 +122,8 @@ struct perf_event_context;
  */
 extern unsigned long avenrun[];		/* Load averages */
 extern void get_avenrun(unsigned long *loads, unsigned long offset, int shift);
+extern void get_avenrun_ve(struct ve_struct *ve, unsigned long *loads,
+			unsigned long offset, int shift);
 
 #define FSHIFT		11		/* nr of bits of precision */
 #define FIXED_1		(1<<FSHIFT)	/* 1.0 as fixed-point */
@@ -133,15 +137,38 @@ extern void get_avenrun(unsigned long *loads, unsigned long offset, int shift);
 	load += n*(FIXED_1-exp); \
 	load >>= FSHIFT;
 
+#define LOAD_INT(x) ((x) >> FSHIFT)
+#define LOAD_FRAC(x) LOAD_INT(((x) & (FIXED_1-1)) * 100)
+
 extern unsigned long total_forks;
 extern int nr_threads;
 DECLARE_PER_CPU(unsigned long, process_counts);
 extern int nr_processes(void);
 extern unsigned long nr_running(void);
+extern unsigned long nr_sleeping(void);
+extern unsigned long nr_stopped(void);
 extern unsigned long nr_uninterruptible(void);
 extern unsigned long nr_iowait(void);
 extern unsigned long nr_iowait_cpu(void);
 extern unsigned long this_cpu_load(void);
+extern atomic_t nr_dead;
+extern unsigned long nr_zombie;
+
+#ifdef CONFIG_VE
+struct ve_struct;
+extern unsigned long nr_running_ve(struct ve_struct *);
+extern unsigned long nr_iowait_ve(struct ve_struct *);
+extern unsigned long nr_uninterruptible_ve(struct ve_struct *);
+extern cycles_t ve_sched_get_idle_time(struct ve_struct *ve, int cpu);
+extern cycles_t ve_sched_get_iowait_time(struct ve_struct *ve, int cpu);
+void ve_sched_attach(struct ve_struct *envid);
+#else
+#define nr_running_ve(ve)			0
+#define nr_iowait_ve(ve)			0
+#define nr_uninterruptible_ve(ve)		0
+#define ve_sched_get_idle_time(ve, cpu)		0
+#define ve_sched_get_iowait_time(ve, cpu)	0
+#endif
 
 
 extern void calc_global_load(void);
@@ -286,6 +313,7 @@ static inline void show_state(void)
 }
 
 extern void show_regs(struct pt_regs *);
+extern void smp_show_regs(struct pt_regs *, void *);
 
 /*
  * TASK is a pointer to the task whose backtrace we want to see (or NULL for current
@@ -552,6 +580,9 @@ struct thread_group_cputimer {
 	int running;
 	spinlock_t lock;
 };
+
+#include <linux/ve.h>
+#include <linux/ve_task.h>
 
 /*
  * NOTE! "signal_struct" does not have it's own
@@ -864,7 +895,10 @@ static inline int sd_balance_for_mc_power(void)
 	if (sched_smt_power_savings)
 		return SD_POWERSAVINGS_BALANCE;
 
-	return SD_PREFER_SIBLING;
+	if (!sched_mc_power_savings)
+		return SD_PREFER_SIBLING;
+
+	return 0;
 }
 
 static inline int sd_balance_for_package_power(void)
@@ -1280,6 +1314,7 @@ struct task_struct {
 	unsigned in_execve:1;	/* Tell the LSMs that the process is doing an
 				 * execve */
 	unsigned in_iowait:1;
+	unsigned did_ve_enter:1;
 
 
 	/* Revert to default priority/policy when forking */
@@ -1354,7 +1389,7 @@ struct task_struct {
 	char comm[TASK_COMM_LEN]; /* executable name excluding path
 				     - access with [gs]et_task_comm (which lock
 				       it with task_lock())
-				     - initialized normally by flush_old_exec */
+				     - initialized normally by setup_new_exec */
 /* file system info */
 	int link_count, total_link_count;
 #ifdef CONFIG_SYSVIPC
@@ -1495,6 +1530,14 @@ struct task_struct {
 	struct rcu_head rcu;
 
 	/*
+	 * state tracking for suspend
+	 * FIXME - ptrace is completely rewritten in this kernel
+	 * so set_pn_state() is not set in many places correctyl
+	 */
+	__u8	 pn_state;
+	__u8	 stopped_state:1;
+
+	/*
 	 * cache last used pipe for splice
 	 */
 	struct pipe_inode_info *splice_pipe;
@@ -1539,6 +1582,19 @@ struct task_struct {
 	unsigned long trace_recursion;
 #endif /* CONFIG_TRACING */
 	unsigned long stack_start;
+#ifdef CONFIG_BEANCOUNTERS
+	struct task_beancounter task_bc;
+#endif
+#ifdef CONFIG_VE
+	struct ve_task_info ve_task_info;
+#endif
+#if defined(CONFIG_VZ_QUOTA) || defined(CONFIG_VZ_QUOTA_MODULE)
+	unsigned long	magic;
+	struct inode	*ino;
+#endif
+#ifdef CONFIG_VZ_FAIRSCHED
+	struct fairsched_node *fsched_node;
+#endif
 };
 
 /* Future-safe accessor for struct task_struct's cpus_allowed. */
@@ -1724,6 +1780,43 @@ extern cputime_t task_utime(struct task_struct *p);
 extern cputime_t task_stime(struct task_struct *p);
 extern cputime_t task_gtime(struct task_struct *p);
 
+#ifndef CONFIG_VE
+#define set_pn_state(tsk, state)	do { } while(0)
+#define clear_pn_state(tsk)		do { } while(0)
+#define set_stop_state(tsk)		do { } while(0)
+#define clear_stop_state(tsk)		do { } while(0)
+#else
+#define PN_STOP_TF	1	/* was not in 2.6.8 */
+#define PN_STOP_TF_RT	2	/* was not in 2.6.8 */ 
+#define PN_STOP_ENTRY	3
+#define PN_STOP_FORK	4
+#define PN_STOP_VFORK	5
+#define PN_STOP_SIGNAL	6
+#define PN_STOP_EXIT	7
+#define PN_STOP_EXEC	8
+#define PN_STOP_LEAVE	9
+
+static inline void set_pn_state(struct task_struct *tsk, int state)
+{
+	tsk->pn_state = state;
+}
+
+static inline void clear_pn_state(struct task_struct *tsk)
+{
+	tsk->pn_state = 0;
+}
+
+static inline void set_stop_state(struct task_struct *tsk)
+{
+	tsk->stopped_state = 1;
+}
+
+static inline void clear_stop_state(struct task_struct *tsk)
+{
+	tsk->stopped_state = 0;
+}
+#endif
+
 /*
  * Per process flags
  */
@@ -1733,6 +1826,7 @@ extern cputime_t task_gtime(struct task_struct *p);
 #define PF_EXITING	0x00000004	/* getting shut down */
 #define PF_EXITPIDONE	0x00000008	/* pi exit done on shut down */
 #define PF_VCPU		0x00000010	/* I'm a virtual CPU */
+#define PF_EXIT_RESTART	0x00000020	/* do_exit() restarted, see do_exit() */
 #define PF_FORKNOEXEC	0x00000040	/* forked but didn't exec */
 #define PF_MCE_PROCESS  0x00000080      /* process policy on mce errors */
 #define PF_SUPERPRIV	0x00000100	/* used super-user privileges */
@@ -1868,6 +1962,21 @@ extern unsigned long long cpu_clock(int cpu);
 extern unsigned long long
 task_sched_runtime(struct task_struct *task);
 extern unsigned long long thread_group_sched_runtime(struct task_struct *task);
+
+static inline unsigned long cycles_to_clocks(cycles_t cycles)
+{
+	extern unsigned long cycles_per_clock;
+	do_div(cycles, cycles_per_clock);
+	return cycles;
+}
+
+static inline u64 cycles_to_jiffies(cycles_t cycles)
+{
+	extern unsigned long cycles_per_jiffy;
+	do_div(cycles, cycles_per_jiffy);
+	return cycles;
+}
+
 
 /* sched_exec is called by processes performing an exec */
 #ifdef CONFIG_SMP
@@ -2086,11 +2195,18 @@ static inline int is_si_special(const struct siginfo *info)
 	return info <= SEND_SIG_FORCED;
 }
 
-/* True if we are on the alternate signal stack.  */
-
+/*
+ * True if we are on the alternate signal stack.
+ */
 static inline int on_sig_stack(unsigned long sp)
 {
-	return (sp - current->sas_ss_sp < current->sas_ss_size);
+#ifdef CONFIG_STACK_GROWSUP
+	return sp >= current->sas_ss_sp &&
+		sp - current->sas_ss_sp < current->sas_ss_size;
+#else
+	return sp > current->sas_ss_sp &&
+		sp - current->sas_ss_sp <= current->sas_ss_size;
+#endif
 }
 
 static inline int sas_ss_flags(unsigned long sp)
@@ -2141,6 +2257,13 @@ extern int disallow_signal(int);
 
 extern int do_execve(char *, char __user * __user *, char __user * __user *, struct pt_regs *);
 extern long do_fork(unsigned long, unsigned long, struct pt_regs *, unsigned long, int __user *, int __user *);
+extern long do_fork_pid(unsigned long clone_flags,
+			unsigned long stack_start,
+			struct pt_regs *regs,
+			unsigned long stack_size,
+			int __user *parent_tidptr,
+			int __user *child_tidptr,
+			long pid0);
 struct task_struct *fork_idle(int);
 
 extern void set_task_comm(struct task_struct *tsk, char *from);
@@ -2158,11 +2281,11 @@ static inline unsigned long wait_task_inactive(struct task_struct *p,
 }
 #endif
 
-#define next_task(p) \
+#define next_task_all(p) \
 	list_entry_rcu((p)->tasks.next, struct task_struct, tasks)
 
-#define for_each_process(p) \
-	for (p = &init_task ; (p = next_task(p)) != &init_task ; )
+#define for_each_process_all(p) \
+	for (p = &init_task ; (p = next_task_all(p)) != &init_task ; )
 
 extern bool current_is_single_threaded(void);
 
@@ -2170,10 +2293,10 @@ extern bool current_is_single_threaded(void);
  * Careful: do_each_thread/while_each_thread is a double loop so
  *          'break' will not work as expected - use goto instead.
  */
-#define do_each_thread(g, t) \
-	for (g = t = &init_task ; (g = t = next_task(g)) != &init_task ; ) do
+#define do_each_thread_all(g, t) \
+	for (g = t = &init_task ; (g = t = next_task_all(g)) != &init_task ; ) do
 
-#define while_each_thread(g, t) \
+#define while_each_thread_all(g, t) \
 	while ((t = next_thread(t)) != g)
 
 /* de_thread depends on thread_group_leader not being a pid based check */
@@ -2198,8 +2321,14 @@ int same_thread_group(struct task_struct *p1, struct task_struct *p2)
 
 static inline struct task_struct *next_thread(const struct task_struct *p)
 {
-	return list_entry_rcu(p->thread_group.next,
+	struct task_struct *tsk;
+	tsk = list_entry_rcu(p->thread_group.next,
 			      struct task_struct, thread_group);
+#ifdef CONFIG_VE
+	/* all threads should belong to ONE ve! */
+	BUG_ON(VE_TASK_INFO(tsk)->owner_env != VE_TASK_INFO(p)->owner_env);
+#endif
+	return tsk;
 }
 
 static inline int thread_group_empty(struct task_struct *p)
@@ -2243,6 +2372,98 @@ static inline void unlock_task_sighand(struct task_struct *tsk,
 {
 	spin_unlock_irqrestore(&tsk->sighand->siglock, *flags);
 }
+
+#ifndef CONFIG_VE
+
+#define for_each_process_ve(p)		for_each_process_all(p)
+#define do_each_thread_ve(g, t)		do_each_thread_all(g, t)
+#define while_each_thread_ve(g, t)	while_each_thread_all(g, t)
+#define first_task_ve()			next_task_ve(&init_task)
+#define __first_task_ve(owner)		next_task_ve(&init_task)
+#define __next_task_ve(owner, p)	next_task_ve(p)
+#define next_task_ve(p)			\
+	(next_task_all(p) != &init_task ? next_task_all(p) : NULL)
+
+#define ve_is_super(env)				1
+#define ve_accessible(target, owner)			1
+#define ve_accessible_strict(target, owner)		1
+#define ve_accessible_veid(target, owner)		1
+#define ve_accessible_strict_veid(target, owner)	1
+
+#define VEID(ve)					0
+
+#else	/* CONFIG_VE */
+
+#include <linux/ve.h>
+
+#define ve_is_super(env)			((env) == get_ve0())
+
+#define ve_accessible_strict(target, owner)	((target) == (owner))
+static inline int ve_accessible(struct ve_struct *target,
+		struct ve_struct *owner)
+{
+	return ve_is_super(owner) || ve_accessible_strict(target, owner);
+}
+
+#define ve_accessible_strict_veid(target, owner) ((target) == (owner))
+static inline int ve_accessible_veid(envid_t target, envid_t owner)
+{
+	return get_ve0()->veid == owner ||
+		ve_accessible_strict_veid(target, owner);
+}
+
+#define VEID(ve)	(ve->veid)
+
+static inline struct task_struct *ve_lh2task(struct ve_struct *ve,
+		struct list_head *lh)
+{
+	return lh == &ve->vetask_lh ? NULL :
+		list_entry(lh, struct task_struct, ve_task_info.vetask_list);
+}
+
+static inline struct task_struct *__first_task_ve(struct ve_struct *ve)
+{
+	struct task_struct *tsk;
+
+	if (unlikely(ve_is_super(ve))) {
+		tsk = next_task_all(&init_task);
+		if (tsk == &init_task)
+			tsk = NULL;
+	} else {
+		tsk = ve_lh2task(ve, rcu_dereference(ve->vetask_lh.next));
+	}
+	return tsk;
+}
+
+static inline struct task_struct *__next_task_ve(struct ve_struct *ve,
+		struct task_struct *tsk)
+{
+	if (unlikely(ve_is_super(ve))) {
+		tsk = next_task_all(tsk);
+		if (tsk == &init_task)
+			tsk = NULL;
+	} else {
+		BUG_ON(tsk->ve_task_info.owner_env != ve);
+		tsk = ve_lh2task(ve, rcu_dereference(tsk->
+					ve_task_info.vetask_list.next));
+	}
+	return tsk;
+}
+
+#define first_task_ve()	__first_task_ve(get_exec_env())
+#define next_task_ve(p)	__next_task_ve(get_exec_env(), p)
+/* no one uses prev_task_ve(), copy next_task_ve() if needed */
+
+#define for_each_process_ve(p) \
+	for (p = first_task_ve(); p != NULL ; p = next_task_ve(p))
+
+#define do_each_thread_ve(g, t) \
+	for (g = t = first_task_ve() ; g != NULL; g = t = next_task_ve(g)) do
+
+#define while_each_thread_ve(g, t) \
+	while ((t = next_thread(t)) != g)
+
+#endif	/* CONFIG_VE */
 
 #ifndef __HAVE_THREAD_FUNCTIONS
 
@@ -2575,6 +2796,28 @@ static inline void mm_init_owner(struct mm_struct *mm, struct task_struct *p)
 #endif /* CONFIG_MM_OWNER */
 
 #define TASK_STATE_TO_CHAR_STR "RSDTtZX"
+
+static inline unsigned long task_rlimit(const struct task_struct *tsk,
+		unsigned int limit)
+{
+	return ACCESS_ONCE(tsk->signal->rlim[limit].rlim_cur);
+}
+
+static inline unsigned long task_rlimit_max(const struct task_struct *tsk,
+		unsigned int limit)
+{
+	return ACCESS_ONCE(tsk->signal->rlim[limit].rlim_max);
+}
+
+static inline unsigned long rlimit(unsigned int limit)
+{
+	return task_rlimit(current, limit);
+}
+
+static inline unsigned long rlimit_max(unsigned int limit)
+{
+	return task_rlimit_max(current, limit);
+}
 
 #endif /* __KERNEL__ */
 

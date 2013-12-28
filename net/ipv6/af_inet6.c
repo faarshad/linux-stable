@@ -57,6 +57,10 @@
 #ifdef CONFIG_IPV6_TUNNEL
 #include <net/ip6_tunnel.h>
 #endif
+#ifdef CONFIG_IPV6_MIP6
+#include <net/mip6.h>
+#endif
+#include <bc/net.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -157,6 +161,10 @@ lookup_protocol:
 			goto out_rcu_unlock;
 	}
 
+	err = vz_security_protocol_check(answer->protocol);
+	if (err < 0)
+		goto out_rcu_unlock;
+
 	err = -EPERM;
 	if (answer->capability > 0 && !capable(answer->capability))
 		goto out_rcu_unlock;
@@ -173,6 +181,13 @@ lookup_protocol:
 	sk = sk_alloc(net, PF_INET6, GFP_KERNEL, answer_prot);
 	if (sk == NULL)
 		goto out;
+
+	err = -ENOBUFS;
+	if (ub_sock_charge(sk, PF_INET6, sock->type))
+		goto out_sk_free;
+	/* if charge was successful, sock_init_data() MUST be called to
+	 * set sk->sk_type. otherwise sk will be uncharged to wrong resource
+	 */
 
 	sock_init_data(sock, sk);
 
@@ -248,6 +263,9 @@ out:
 out_rcu_unlock:
 	rcu_read_unlock();
 	goto out;
+out_sk_free:
+	sk_free(sk);
+	return err;
 }
 
 

@@ -254,7 +254,7 @@ static int fill_tgid(pid_t tgid, struct task_struct *first,
 
 		stats->nvcsw += tsk->nvcsw;
 		stats->nivcsw += tsk->nivcsw;
-	} while_each_thread(first, tsk);
+	} while_each_thread_all(first, tsk);
 
 	unlock_task_sighand(first, &flags);
 	rc = 0;

@@ -254,8 +254,10 @@ void show_registers(struct pt_regs *regs)
 	sp = regs->sp;
 	printk("CPU %d ", cpu);
 	__show_regs(regs, 1);
-	printk("Process %s (pid: %d, threadinfo %p, task %p)\n",
-		cur->comm, cur->pid, task_thread_info(cur), cur);
+	printk("Process %s (pid: %d, veid=%d, threadinfo %p, task %p)\n",
+		cur->comm, cur->pid,
+		VEID(VE_TASK_INFO(current)->owner_env),
+		task_thread_info(cur), cur);
 
 	/*
 	 * When in-kernel, we also print out the stack and code at the

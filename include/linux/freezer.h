@@ -160,6 +160,8 @@ static inline void set_freezable_with_signal(void)
 	} while (try_to_freeze());					\
 	__retval;							\
 })
+
+extern atomic_t global_suspend;
 #else /* !CONFIG_FREEZER */
 static inline int frozen(struct task_struct *p) { return 0; }
 static inline int freezing(struct task_struct *p) { return 0; }

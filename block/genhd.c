@@ -22,9 +22,7 @@
 #include "blk.h"
 
 static DEFINE_MUTEX(block_class_lock);
-#ifndef CONFIG_SYSFS_DEPRECATED
 struct kobject *block_depr;
-#endif
 
 /* for extended dynamic devt allocation, currently only one major is used */
 #define MAX_EXT_DEVT		(1 << MINORBITS)
@@ -793,7 +791,7 @@ static int __init genhd_device_init(void)
 {
 	int error;
 
-	block_class.dev_kobj = sysfs_dev_block_kobj;
+	block_class.dev_kobj = ve_sysfs_dev_block_kobj;
 	error = class_register(&block_class);
 	if (unlikely(error))
 		return error;
@@ -802,10 +800,10 @@ static int __init genhd_device_init(void)
 
 	register_blkdev(BLOCK_EXT_MAJOR, "blkext");
 
-#ifndef CONFIG_SYSFS_DEPRECATED
-	/* create top-level block dir */
-	block_depr = kobject_create_and_add("block", NULL);
-#endif
+	if (!sysfs_deprecated)
+		/* create top-level block dir */
+		block_depr = kobject_create_and_add("block", NULL);
+
 	return 0;
 }
 
@@ -997,6 +995,7 @@ static void disk_release(struct device *dev)
 struct class block_class = {
 	.name		= "block",
 };
+EXPORT_SYMBOL(block_class);
 
 static char *block_devnode(struct device *dev, mode_t *mode)
 {

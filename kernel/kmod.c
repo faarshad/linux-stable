@@ -80,6 +80,10 @@ int __request_module(bool wait, const char *fmt, ...)
 #define MAX_KMOD_CONCURRENT 50	/* Completely arbitrary value - KAO */
 	static int kmod_loop_msg;
 
+	/* Don't allow request_module() inside VE. */
+	if (!ve_is_super(get_exec_env()))
+		return -EPERM;
+
 	ret = security_kernel_module_request();
 	if (ret)
 		return ret;
@@ -468,6 +472,9 @@ int call_usermodehelper_exec(struct subprocess_info *sub_info,
 {
 	DECLARE_COMPLETION_ONSTACK(done);
 	int retval = 0;
+
+	if (!ve_is_super(get_exec_env()))
+		return -EPERM;
 
 	BUG_ON(atomic_read(&sub_info->cred->usage) != 1);
 	validate_creds(sub_info->cred);

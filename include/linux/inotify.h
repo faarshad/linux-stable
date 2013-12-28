@@ -101,6 +101,11 @@ struct inotify_operations {
 	void (*destroy_watch)(struct inotify_watch *);
 };
 
+struct fsnotify_group;
+extern const struct file_operations inotify_fops;
+int __inotify_new_watch(struct fsnotify_group *group,
+			     struct path *path, __u32 mask, int wd);
+
 #ifdef CONFIG_INOTIFY
 
 /* Kernel API for producing events */

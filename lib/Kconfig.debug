@@ -136,6 +136,15 @@ config DEBUG_SECTION_MISMATCH
 	  - Enable verbose reporting from modpost to help solving
 	    the section mismatches reported.
 
+config SYSRQ_DEBUG
+	bool "Debugging via sysrq keys"
+	depends on MAGIC_SYSRQ
+	default y
+	help
+	  Say Y if you want to extend functionality of magic key. It will
+	  provide you with some debugging facilities such as dumping and
+	  writing memory, resolving symbols and some other.
+
 config DEBUG_KERNEL
 	bool "Kernel debugging"
 	help

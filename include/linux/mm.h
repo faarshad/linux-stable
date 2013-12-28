@@ -712,6 +712,7 @@ extern void pagefault_out_of_memory(void);
 extern void show_free_areas(void);
 
 int shmem_lock(struct file *file, int lock, struct user_struct *user);
+#define shmem_nopage filemap_nopage
 struct file *shmem_file_setup(const char *name, loff_t size, unsigned long flags);
 int shmem_zero_setup(struct vm_area_struct *);
 
@@ -776,7 +777,9 @@ int walk_page_range(unsigned long addr, unsigned long end,
 void free_pgd_range(struct mmu_gather *tlb, unsigned long addr,
 		unsigned long end, unsigned long floor, unsigned long ceiling);
 int copy_page_range(struct mm_struct *dst, struct mm_struct *src,
-			struct vm_area_struct *vma);
+		struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma);
+int __copy_page_range(struct vm_area_struct *dst_vma, struct vm_area_struct *vma,
+		      unsigned long addr, size_t size);
 void unmap_mapping_range(struct address_space *mapping,
 		loff_t const holebegin, loff_t const holelen, int even_cows);
 int follow_pfn(struct vm_area_struct *vma, unsigned long address,
@@ -832,7 +835,7 @@ int __set_page_dirty_nobuffers(struct page *page);
 int __set_page_dirty_no_writeback(struct page *page);
 int redirty_page_for_writepage(struct writeback_control *wbc,
 				struct page *page);
-void account_page_dirtied(struct page *page, struct address_space *mapping);
+int account_page_dirtied(struct page *page, struct address_space *mapping);
 int set_page_dirty(struct page *page);
 int set_page_dirty_lock(struct page *page);
 int clear_page_dirty_for_io(struct page *page);

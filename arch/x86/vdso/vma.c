@@ -4,6 +4,7 @@
  * Subject to the GPL, v.2
  */
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/err.h>
 #include <linux/sched.h>
 #include <linux/init.h>
@@ -99,17 +100,23 @@ static unsigned long vdso_addr(unsigned long start, unsigned len)
 
 /* Setup a VMA at program startup for the vsyscall page.
    Not called for compat tasks */
-int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
+int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp,
+				unsigned long map_address)
 {
 	struct mm_struct *mm = current->mm;
 	unsigned long addr;
 	int ret;
 
-	if (!vdso_enabled)
+	if (!vdso_enabled && map_address == 0) {
+		current->mm->context.vdso = NULL;
 		return 0;
+	}
 
 	down_write(&mm->mmap_sem);
-	addr = vdso_addr(mm->start_stack, vdso_size);
+	if (map_address)
+		addr = map_address;
+	else
+		addr = vdso_addr(mm->start_stack, vdso_size);
 	addr = get_unmapped_area(NULL, addr, vdso_size, 0, 0);
 	if (IS_ERR_VALUE(addr)) {
 		ret = addr;
@@ -132,6 +139,7 @@ up_fail:
 	up_write(&mm->mmap_sem);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(arch_setup_additional_pages);
 
 static __init int vdso_setup(char *s)
 {

@@ -234,4 +234,8 @@ static inline struct kiocb *list_kiocb(struct list_head *h)
 extern unsigned long aio_nr;
 extern unsigned long aio_max_nr;
 
+void wait_for_all_aios(struct kioctx *ctx);
+extern struct kmem_cache *kioctx_cachep;
+extern void aio_kick_handler(struct work_struct *);
+
 #endif /* __LINUX__AIO_H */

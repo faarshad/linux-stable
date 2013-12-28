@@ -50,6 +50,7 @@ struct rpc_clnt {
 				cl_discrtry : 1,/* disconnect before retry */
 				cl_autobind : 1,/* use getport() */
 				cl_chatty   : 1;/* be verbose */
+	unsigned int		cl_broken   : 1;/* no responce for too long */
 
 	struct rpc_rtt *	cl_rtt;		/* RTO estimator data */
 	const struct rpc_timeout *cl_timeout;	/* Timeout strategy */
@@ -61,6 +62,7 @@ struct rpc_clnt {
 	struct rpc_rtt		cl_rtt_default;
 	struct rpc_timeout	cl_timeout_default;
 	struct rpc_program *	cl_program;
+	unsigned long		cl_pr_time;
 	char			cl_inline_name[32];
 	char			*cl_principal;	/* target to authenticate to */
 };

@@ -1,6 +1,7 @@
 #include <linux/workqueue.h>
 #include <linux/rtnetlink.h>
 #include <linux/cache.h>
+#include <linux/proc_fs.h>
 #include <linux/slab.h>
 #include <linux/list.h>
 #include <linux/delay.h>
@@ -35,6 +36,10 @@ static __net_init int setup_net(struct net *net)
 	/* Must be called with net_mutex held */
 	struct pernet_operations *ops;
 	int error = 0;
+
+#ifdef CONFIG_VE
+	net->owner_ve = get_exec_env();
+#endif
 
 	atomic_set(&net->count, 1);
 
@@ -106,6 +111,8 @@ out_free:
 
 static void net_free(struct net *net)
 {
+	struct completion *sysfs_completion;
+
 #ifdef NETNS_REFCNT_DEBUG
 	if (unlikely(atomic_read(&net->use_count) != 0)) {
 		printk(KERN_EMERG "network namespace not free! Usage: %d\n",
@@ -113,8 +120,11 @@ static void net_free(struct net *net)
 		return;
 	}
 #endif
+	sysfs_completion = net->sysfs_completion;
 	kfree(net->gen);
 	kmem_cache_free(net_cachep, net);
+	if (sysfs_completion)
+		complete(sysfs_completion);
 }
 
 static struct net *net_create(void)
@@ -151,6 +161,7 @@ static void cleanup_net(struct work_struct *work)
 {
 	struct pernet_operations *ops;
 	struct net *net;
+	struct ve_struct *old_ve;
 
 	net = container_of(work, struct net, work);
 
@@ -168,11 +179,13 @@ static void cleanup_net(struct work_struct *work)
 	 */
 	synchronize_rcu();
 
+	old_ve = set_exec_env(net->owner_ve);
 	/* Run all of the network namespace exit methods */
 	list_for_each_entry_reverse(ops, &pernet_list, list) {
 		if (ops->exit)
 			ops->exit(net);
 	}
+	(void)set_exec_env(old_ve);
 
 	mutex_unlock(&net_mutex);
 
@@ -259,6 +272,16 @@ static int __init net_ns_init(void)
 pure_initcall(net_ns_init);
 
 #ifdef CONFIG_NET_NS
+
+#include <linux/netdevice.h>
+
+static inline void set_net_context(struct net *net)
+{
+	set_exec_env(net->owner_ve);
+	if (net->loopback_dev)
+		set_exec_ub(netdev_bc(net->loopback_dev)->exec_ub);
+}
+
 static int register_pernet_operations(struct list_head *list,
 				      struct pernet_operations *ops)
 {
@@ -268,7 +291,9 @@ static int register_pernet_operations(struct list_head *list,
 	list_add_tail(&ops->list, list);
 	if (ops->init) {
 		for_each_net(net) {
+			set_net_context(net);
 			error = ops->init(net);
+			set_net_context(&init_net);
 			if (error)
 				goto out_undo;
 		}
@@ -282,7 +307,10 @@ out_undo:
 		for_each_net(undo_net) {
 			if (undo_net == net)
 				goto undone;
+
+			set_net_context(undo_net);
 			ops->exit(undo_net);
+			set_net_context(&init_net);
 		}
 	}
 undone:
@@ -295,8 +323,11 @@ static void unregister_pernet_operations(struct pernet_operations *ops)
 
 	list_del(&ops->list);
 	if (ops->exit)
-		for_each_net(net)
+		for_each_net(net) {
+			set_net_context(net);
 			ops->exit(net);
+			set_net_context(&init_net);
+		}
 }
 
 #else

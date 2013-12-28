@@ -256,6 +256,8 @@ void flush_tlb_mm(struct mm_struct *mm)
 	preempt_enable();
 }
 
+EXPORT_SYMBOL(flush_tlb_mm);
+
 void flush_tlb_page(struct vm_area_struct *vma, unsigned long va)
 {
 	struct mm_struct *mm = vma->vm_mm;

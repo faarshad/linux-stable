@@ -8,6 +8,7 @@
 #include <linux/mm.h>
 #include <linux/nmi.h>
 #include <linux/quicklist.h>
+#include <linux/module.h>
 
 void show_mem(void)
 {
@@ -61,3 +62,4 @@ void show_mem(void)
 		quicklist_total_size());
 #endif
 }
+EXPORT_SYMBOL_GPL(show_mem);

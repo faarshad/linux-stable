@@ -10,6 +10,7 @@ extern void unix_inflight(struct file *fp);
 extern void unix_notinflight(struct file *fp);
 extern void unix_gc(void);
 extern void wait_for_unix_gc(void);
+extern void unix_destruct_fds(struct sk_buff *skb);
 
 #define UNIX_HASH_SIZE	256
 

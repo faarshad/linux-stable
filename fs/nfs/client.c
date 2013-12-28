@@ -125,6 +125,7 @@ static struct nfs_client *nfs_alloc_client(const struct nfs_client_initdata *cl_
 
 	atomic_set(&clp->cl_count, 1);
 	clp->cl_cons_state = NFS_CS_INITING;
+	clp->owner_env = get_exec_env();
 
 	memcpy(&clp->cl_addr, cl_init->addr, cl_init->addrlen);
 	clp->cl_addrlen = cl_init->addrlen;
@@ -364,6 +365,7 @@ static int nfs_sockaddr_cmp(const struct sockaddr *sa1,
 struct nfs_client *nfs_find_client(const struct sockaddr *addr, u32 nfsversion)
 {
 	struct nfs_client *clp;
+	struct ve_struct *ve = get_exec_env();
 
 	spin_lock(&nfs_client_lock);
 	list_for_each_entry(clp, &nfs_client_list, cl_share_link) {
@@ -376,6 +378,9 @@ struct nfs_client *nfs_find_client(const struct sockaddr *addr, u32 nfsversion)
 
 		/* Different NFS versions cannot share the same nfs_client */
 		if (clp->rpc_ops->version != nfsversion)
+			continue;
+
+		if (!ve_accessible_strict(clp->owner_env, ve))
 			continue;
 
 		/* Match only the IP address, not the port number */
@@ -398,6 +403,7 @@ struct nfs_client *nfs_find_client_next(struct nfs_client *clp)
 {
 	struct sockaddr *sap = (struct sockaddr *)&clp->cl_addr;
 	u32 nfsvers = clp->rpc_ops->version;
+	struct ve_struct *ve = get_exec_env();
 
 	spin_lock(&nfs_client_lock);
 	list_for_each_entry_continue(clp, &nfs_client_list, cl_share_link) {
@@ -409,6 +415,9 @@ struct nfs_client *nfs_find_client_next(struct nfs_client *clp)
 
 		/* Different NFS versions cannot share the same nfs_client */
 		if (clp->rpc_ops->version != nfsvers)
+			continue;
+
+		if (!ve_accessible_strict(clp->owner_env, ve))
 			continue;
 
 		/* Match only the IP address, not the port number */
@@ -431,12 +440,17 @@ static struct nfs_client *nfs_match_client(const struct nfs_client_initdata *dat
 {
 	struct nfs_client *clp;
 	const struct sockaddr *sap = data->addr;
+	struct ve_struct *ve;
 
+	ve = get_exec_env();
 	list_for_each_entry(clp, &nfs_client_list, cl_share_link) {
 	        const struct sockaddr *clap = (struct sockaddr *)&clp->cl_addr;
 		/* Don't match clients that failed to initialise properly */
 		if (clp->cl_cons_state < 0)
 			continue;
+
+		if (!ve_accessible_strict(clp->owner_env, ve))
+				continue;
 
 		/* Different NFS versions cannot share the same nfs_client */
 		if (clp->rpc_ops != data->rpc_ops)

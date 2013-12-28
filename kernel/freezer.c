@@ -29,6 +29,28 @@ void refrigerator(void)
 	   processes around? */
 	long save;
 
+#if defined(CONFIG_VZ_CHECKPOINT) || defined(CONFIG_VZ_CHECKPOINT_MODULE)
+	save = current->state;
+	current->state = TASK_UNINTERRUPTIBLE;
+
+	spin_lock_irq(&current->sighand->siglock);
+	if (test_and_clear_thread_flag(TIF_FREEZE)) {
+		recalc_sigpending(); /* We sent fake signal, clean it up */
+		if (atomic_read(&global_suspend) ||
+				atomic_read(&get_exec_env()->suspend))
+			current->flags |= PF_FROZEN;
+		else
+			current->state = save;
+	} else {
+		/* Freeze request could be canceled before we entered
+		 * refrigerator(). In this case we do nothing. */
+		current->state = save;
+	}
+	spin_unlock_irq(&current->sighand->siglock);
+
+	while (current->flags & PF_FROZEN)
+		schedule();
+#else
 	task_lock(current);
 	if (freezing(current)) {
 		frozen_process();
@@ -57,6 +79,7 @@ void refrigerator(void)
 	/* Remove the accounting blocker */
 	current->flags &= ~PF_FREEZING;
 
+#endif
 	pr_debug("%s left refrigerator\n", current->comm);
 	__set_current_state(save);
 }

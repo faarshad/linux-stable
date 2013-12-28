@@ -129,7 +129,12 @@ extern char *make_class_name(const char *name, struct kobject *kobj);
 
 extern int devres_release_all(struct device *dev);
 
+#ifndef CONFIG_VE
 extern struct kset *devices_kset;
+#define ve_devices_kset devices_kset
+#else
+#define ve_devices_kset (get_exec_env()->devices_kset)
+#endif
 
 #if defined(CONFIG_MODULES) && defined(CONFIG_SYSFS)
 extern void module_add_driver(struct module *mod, struct device_driver *drv);

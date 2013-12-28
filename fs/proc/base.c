@@ -156,10 +156,14 @@ static int get_fs_path(struct task_struct *task, struct path *path, bool root)
 	fs = task->fs;
 	if (fs) {
 		read_lock(&fs->lock);
-		*path = root ? fs->root : fs->pwd;
-		path_get(path);
-		read_unlock(&fs->lock);
 		result = 0;
+		if (!root)
+			result = d_root_check(&fs->pwd);
+		if (result == 0) {
+			*path = root ? fs->root : fs->pwd;
+			path_get(path);
+		}
+		read_unlock(&fs->lock);
 	}
 	task_unlock(task);
 	return result;
@@ -549,17 +553,31 @@ static int proc_pid_syscall(struct task_struct *task, char *buffer)
 static int proc_fd_access_allowed(struct inode *inode)
 {
 	struct task_struct *task;
-	int allowed = 0;
+	int err;
+
 	/* Allow access to a task's file descriptors if it is us or we
 	 * may use ptrace attach to the process and find out that
 	 * information.
 	 */
+	err = -ENOENT;
 	task = get_proc_task(inode);
 	if (task) {
-		allowed = ptrace_may_access(task, PTRACE_MODE_READ);
+		if (ptrace_may_access(task, PTRACE_MODE_READ))
+			err = 0;
+		else
+			/*
+			 * This clever ptrace_may_attach() may play a trick
+			 * on us. If the task is zombie it will consider this
+			 * task to be not dumpable at all and will deny any
+			 * ptracing in VE. Not a big deal for ptrace(), but
+			 * following the link will fail with the -EACCESS
+			 * reason. Some software is unable to stand such a
+			 * swindle and refuses to work :(
+			 */
+			err = (task->mm ? -EACCES : -ENOENT);
 		put_task_struct(task);
 	}
-	return allowed;
+	return err;
 }
 
 static int proc_setattr(struct dentry *dentry, struct iattr *attr)
@@ -1038,6 +1056,8 @@ static ssize_t oom_adjust_write(struct file *file, const char __user *buf,
 	if ((oom_adjust < OOM_ADJUST_MIN || oom_adjust > OOM_ADJUST_MAX) &&
 	     oom_adjust != OOM_DISABLE)
 		return -EINVAL;
+	if (oom_adjust == OOM_DISABLE && !ve_is_super(get_exec_env()))
+		return -EPERM;
 
 	task = get_proc_task(file->f_path.dentry->d_inode);
 	if (!task)
@@ -1294,6 +1314,7 @@ void set_mm_exe_file(struct mm_struct *mm, struct file *new_exe_file)
 	mm->exe_file = new_exe_file;
 	mm->num_exe_file_vmas = 0;
 }
+EXPORT_SYMBOL(set_mm_exe_file);
 
 struct file *get_mm_exe_file(struct mm_struct *mm)
 {
@@ -1332,10 +1353,15 @@ static int proc_exe_link(struct inode *inode, struct path *exe_path)
 	exe_file = get_mm_exe_file(mm);
 	mmput(mm);
 	if (exe_file) {
-		*exe_path = exe_file->f_path;
-		path_get(&exe_file->f_path);
+		int result;
+
+		result = d_root_check(&exe_file->f_path);
+		if (result == 0) {
+			*exe_path = exe_file->f_path;
+			path_get(&exe_file->f_path);
+		}
 		fput(exe_file);
-		return 0;
+		return result;
 	} else
 		return -ENOENT;
 }
@@ -1343,13 +1369,14 @@ static int proc_exe_link(struct inode *inode, struct path *exe_path)
 static void *proc_pid_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
 	struct inode *inode = dentry->d_inode;
-	int error = -EACCES;
+	int error;
 
 	/* We don't need a base pointer in the /proc filesystem */
 	path_put(&nd->path);
 
 	/* Are we allowed to snoop on the tasks file descriptors? */
-	if (!proc_fd_access_allowed(inode))
+	error = proc_fd_access_allowed(inode);
+	if (error < 0)
 		goto out;
 
 	error = PROC_I(inode)->op.proc_get_link(inode, &nd->path);
@@ -1384,12 +1411,13 @@ static int do_proc_readlink(struct path *path, char __user *buffer, int buflen)
 
 static int proc_pid_readlink(struct dentry * dentry, char __user * buffer, int buflen)
 {
-	int error = -EACCES;
+	int error;
 	struct inode *inode = dentry->d_inode;
 	struct path path;
 
 	/* Are we allowed to snoop on the tasks file descriptors? */
-	if (!proc_fd_access_allowed(inode))
+	error = proc_fd_access_allowed(inode);
+	if (error < 0)
 		goto out;
 
 	error = PROC_I(inode)->op.proc_get_link(inode, &path);
@@ -1640,6 +1668,7 @@ static int proc_fd_info(struct inode *inode, struct path *path, char *info)
 	struct files_struct *files = NULL;
 	struct file *file;
 	int fd = proc_fd(inode);
+	int err = -ENOENT;
 
 	if (task) {
 		files = get_files_struct(task);
@@ -1652,7 +1681,8 @@ static int proc_fd_info(struct inode *inode, struct path *path, char *info)
 		 */
 		spin_lock(&files->file_lock);
 		file = fcheck_files(files, fd);
-		if (file) {
+		err = -EACCES;
+		if (file && !d_root_check(&file->f_path)) {
 			if (path) {
 				*path = file->f_path;
 				path_get(&file->f_path);
@@ -1670,7 +1700,7 @@ static int proc_fd_info(struct inode *inode, struct path *path, char *info)
 		spin_unlock(&files->file_lock);
 		put_files_struct(files);
 	}
-	return -ENOENT;
+	return err;
 }
 
 static int proc_fd_link(struct inode *inode, struct path *path)
@@ -2304,16 +2334,30 @@ static void *proc_self_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
 	struct pid_namespace *ns = dentry->d_sb->s_fs_info;
 	pid_t tgid = task_tgid_nr_ns(current, ns);
-	char tmp[PROC_NUMBUF];
-	if (!tgid)
-		return ERR_PTR(-ENOENT);
-	sprintf(tmp, "%d", task_tgid_nr_ns(current, ns));
-	return ERR_PTR(vfs_follow_link(nd,tmp));
+	char *name = ERR_PTR(-ENOENT);
+	if (tgid) {
+		name = __getname();
+		if (!name)
+			name = ERR_PTR(-ENOMEM);
+		else
+			sprintf(name, "%d", tgid);
+	}
+	nd_set_link(nd, name);
+	return NULL;
+}
+
+static void proc_self_put_link(struct dentry *dentry, struct nameidata *nd,
+				void *cookie)
+{
+	char *s = nd_get_link(nd);
+	if (!IS_ERR(s))
+		__putname(s);
 }
 
 static const struct inode_operations proc_self_inode_operations = {
 	.readlink	= proc_self_readlink,
 	.follow_link	= proc_self_follow_link,
+	.put_link	= proc_self_put_link,
 };
 
 /*
@@ -2443,7 +2487,7 @@ static int do_io_accounting(struct task_struct *task, char *buffer, int whole)
 		struct task_struct *t = task;
 
 		task_io_accounting_add(&acct, &task->signal->ioac);
-		while_each_thread(task, t)
+		while_each_thread_ve(task, t)
 			task_io_accounting_add(&acct, &t->ioac);
 
 		unlock_task_sighand(task, &flags);

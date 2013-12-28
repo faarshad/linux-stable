@@ -29,6 +29,8 @@
 #include <linux/math64.h>
 #include <linux/fault-inject.h>
 
+#include <bc/kmem.h>
+
 /*
  * Lock order:
  *   1. slab_lock(page)
@@ -149,9 +151,11 @@
 
 /*
  * Set of flags that will prevent slab merging
+ *
+ * FIXME - think over how to allow merging accountable slubs
  */
 #define SLUB_NEVER_MERGE (SLAB_RED_ZONE | SLAB_POISON | SLAB_STORE_USER | \
-		SLAB_TRACE | SLAB_DESTROY_BY_RCU | SLAB_NOLEAKTRACE)
+		SLAB_TRACE | SLAB_DESTROY_BY_RCU | SLAB_NOLEAKTRACE | SLAB_UBC)
 
 #define SLUB_MERGE_SAME (SLAB_DEBUG_FREE | SLAB_RECLAIM_ACCOUNT | \
 		SLAB_CACHE_DMA | SLAB_NOTRACK)
@@ -319,6 +323,95 @@ static inline int oo_order(struct kmem_cache_order_objects x)
 static inline int oo_objects(struct kmem_cache_order_objects x)
 {
 	return x.x & OO_MASK;
+}
+
+#ifdef CONFIG_BEANCOUNTERS
+static inline void inc_cache_grown(struct kmem_cache *s)
+{
+	atomic_inc(&s->grown);
+}
+
+static inline void dec_cache_grown(struct kmem_cache *s)
+{
+	atomic_dec(&s->grown);
+}
+
+unsigned long ub_cache_growth(struct kmem_cache *cachep)
+{
+	return atomic_read(&cachep->grown) << cachep->oo.x; /* XXX huh? */
+}
+
+static void __flush_cpu_slab(struct kmem_cache *s, int cpu);
+
+int kmem_cache_objuse(struct kmem_cache *cachep)
+{
+	return cachep->objuse;
+}
+
+EXPORT_SYMBOL(kmem_cache_objuse);
+
+int kmem_obj_objuse(void *obj)
+{
+	return kmem_cache_objuse(virt_to_head_page(obj)->slab);
+}
+
+EXPORT_SYMBOL(kmem_obj_objuse);
+
+int kmem_dname_objuse(void *obj)
+{
+	struct kmem_cache *s;
+
+	/*
+	 * Allocations larger than PAGE_SIZE/2 go directly through
+	 * __get_free_pages() and aren't associated with any cache.
+	 */
+	s = virt_to_head_page(obj)->slab;
+	if (!s)
+		return PAGE_SIZE;
+	return kmem_cache_objuse(s);
+}
+
+#define page_ubs(pg)	(pg->bc.slub_ubs)
+
+struct user_beancounter **ub_slab_ptr(struct kmem_cache *s, void *obj)
+{
+	struct page *pg;
+
+	BUG_ON(!(s->flags & SLAB_UBC));
+	pg = virt_to_head_page(obj);
+	return page_ubs(pg) + slab_index(obj, s, page_address(pg));
+}
+
+EXPORT_SYMBOL(ub_slab_ptr);
+
+struct user_beancounter *slab_ub(void *obj)
+{
+	struct page *pg;
+
+	pg = virt_to_head_page(obj);
+	BUG_ON(!(pg->slab->flags & SLAB_UBC));
+	return page_ubs(pg)[slab_index(obj, pg->slab, page_address(pg))];
+}
+
+EXPORT_SYMBOL(slab_ub);
+
+void kmem_mark_nocharge(struct kmem_cache *cachep)
+{
+	cachep->flags |= SLAB_NO_CHARGE;
+}
+#else
+static inline void inc_cache_grown(struct kmem_cache *s)
+{
+}
+
+static inline void dec_cache_grown(struct kmem_cache *s)
+{
+}
+#endif
+
+void show_slab_info(void)
+{
+	/* FIXME - show it */
 }
 
 #ifdef CONFIG_SLUB_DEBUG
@@ -1105,6 +1198,7 @@ static struct page *allocate_slab(struct kmem_cache *s, gfp_t flags, int node)
 	struct kmem_cache_order_objects oo = s->oo;
 	gfp_t alloc_gfp;
 
+	flags &= ~__GFP_UBC;
 	flags |= s->allocflags;
 
 	/*
@@ -1149,8 +1243,11 @@ static struct page *allocate_slab(struct kmem_cache *s, gfp_t flags, int node)
 		NR_SLAB_RECLAIMABLE : NR_SLAB_UNRECLAIMABLE,
 		1 << oo_order(oo));
 
+	inc_cache_grown(s);
 	return page;
 }
+
+static void __free_slab(struct kmem_cache *s, struct page *page);
 
 static void setup_object(struct kmem_cache *s, struct page *page,
 				void *object)
@@ -1174,6 +1271,18 @@ static struct page *new_slab(struct kmem_cache *s, gfp_t flags, int node)
 	if (!page)
 		goto out;
 
+#ifdef CONFIG_BEANCOUNTERS
+	if (s->flags & SLAB_UBC) {
+		BUG_ON(page_ubs(page) != NULL);
+		page_ubs(page) = kzalloc(page->objects * sizeof(void *),
+				flags & ~__GFP_UBC);
+		if (page_ubs(page) == NULL) {
+			__free_slab(s, page);
+			page = NULL;
+			goto out;
+		}
+	}
+#endif
 	inc_slabs_node(s, page_to_nid(page), page->objects);
 	page->slab = s;
 	page->flags |= 1 << PG_slab;
@@ -1225,6 +1334,13 @@ static void __free_slab(struct kmem_cache *s, struct page *page)
 
 	__ClearPageSlab(page);
 	reset_page_mapcount(page);
+#ifdef CONFIG_BEANCOUNTERS
+	if (page_ubs(page) != NULL) {
+		BUG_ON(!(s->flags & SLAB_UBC));
+		kfree(page_ubs(page));
+		page_ubs(page) = NULL;
+	}
+#endif
 	if (current->reclaim_state)
 		current->reclaim_state->reclaimed_slab += pages;
 	__free_pages(page, order);
@@ -1249,6 +1365,8 @@ static void free_slab(struct kmem_cache *s, struct page *page)
 		call_rcu(head, rcu_free_slab);
 	} else
 		__free_slab(s, page);
+
+	dec_cache_grown(s);
 }
 
 static void discard_slab(struct kmem_cache *s, struct page *page)
@@ -1733,6 +1851,13 @@ static __always_inline void *slab_alloc(struct kmem_cache *s,
 		c->freelist = object[c->offset];
 		stat(c, ALLOC_FASTPATH);
 	}
+
+	if (object && should_charge(s->flags, gfpflags) &&
+			ub_slab_charge(s, object, gfpflags)) {
+		kmem_cache_free(s, object);
+		object = NULL;
+	}
+
 	local_irq_restore(flags);
 
 	if (unlikely((gfpflags & __GFP_ZERO) && object))
@@ -1875,6 +2000,9 @@ static __always_inline void slab_free(struct kmem_cache *s,
 	c = get_cpu_slab(s, smp_processor_id());
 	kmemcheck_slab_free(s, object, c->objsize);
 	debug_check_no_locks_freed(object, c->objsize);
+
+	if (should_uncharge(s->flags))
+		ub_slab_uncharge(s, x);
 	if (!(s->flags & SLAB_DEBUG_OBJECTS))
 		debug_check_no_obj_freed(object, c->objsize);
 	if (likely(page == c->page && c->node >= 0)) {
@@ -2497,6 +2625,9 @@ static int kmem_cache_open(struct kmem_cache *s, gfp_t gfpflags,
 #ifdef CONFIG_NUMA
 	s->remote_node_defrag_ratio = 1000;
 #endif
+#ifdef CONFIG_BEANCOUNTERS
+	s->objuse = s->size + (sizeof(struct page) / oo_objects(s->oo));
+#endif
 	if (!init_kmem_cache_nodes(s, gfpflags & ~SLUB_DMA))
 		goto error;
 
@@ -2653,6 +2784,10 @@ EXPORT_SYMBOL(kmem_cache_destroy);
 
 struct kmem_cache kmalloc_caches[SLUB_PAGE_SHIFT] __cacheline_aligned;
 EXPORT_SYMBOL(kmalloc_caches);
+#ifdef CONFIG_BEANCOUNTERS
+struct kmem_cache ub_kmalloc_caches[SLUB_PAGE_SHIFT] __cacheline_aligned;
+EXPORT_SYMBOL(ub_kmalloc_caches);
+#endif
 
 static int __init setup_slub_min_order(char *str)
 {
@@ -2694,6 +2829,11 @@ static struct kmem_cache *create_kmalloc_cache(struct kmem_cache *s,
 		const char *name, int size, gfp_t gfp_flags)
 {
 	unsigned int flags = 0;
+
+	if (gfp_flags & __GFP_UBC) {
+		flags = SLAB_UBC | SLAB_NO_CHARGE;
+		gfp_flags &= ~__GFP_UBC;
+	}
 
 	if (gfp_flags & SLUB_DMA)
 		flags = SLAB_CACHE_DMA;
@@ -2843,11 +2983,14 @@ static struct kmem_cache *get_slab(size_t size, gfp_t flags)
 		index = fls(size - 1);
 
 #ifdef CONFIG_ZONE_DMA
-	if (unlikely((flags & SLUB_DMA)))
+	if (unlikely((flags & SLUB_DMA))) {
+		BUG_ON(flags & __GFP_UBC);
 		return dma_kmalloc_cache(index, flags);
+	}
 
 #endif
-	return &kmalloc_caches[index];
+
+	return __kmalloc_cache(flags, index);
 }
 
 void *__kmalloc(size_t size, gfp_t flags)
@@ -3187,6 +3330,11 @@ void __init kmem_cache_init(void)
 	create_kmalloc_cache(&kmalloc_caches[0], "kmem_cache_node",
 		sizeof(struct kmem_cache_node), GFP_NOWAIT);
 	kmalloc_caches[0].refcount = -1;
+#ifdef CONFIG_BEANCOUNTERS
+	create_kmalloc_cache(&ub_kmalloc_caches[0], "kmem_cache_node_ubc",
+		sizeof(struct kmem_cache_node), GFP_NOWAIT | __GFP_UBC);
+	ub_kmalloc_caches[0].refcount = -1;
+#endif
 	caches++;
 
 	hotplug_memory_notifier(slab_memory_callback, SLAB_CALLBACK_PRI);
@@ -3199,17 +3347,29 @@ void __init kmem_cache_init(void)
 	if (KMALLOC_MIN_SIZE <= 32) {
 		create_kmalloc_cache(&kmalloc_caches[1],
 				"kmalloc-96", 96, GFP_NOWAIT);
+#ifdef CONFIG_BEANCOUNTERS
+		create_kmalloc_cache(&ub_kmalloc_caches[1],
+				"kmalloc-96-ubc", 96, GFP_NOWAIT | __GFP_UBC);
+#endif
 		caches++;
 	}
 	if (KMALLOC_MIN_SIZE <= 64) {
 		create_kmalloc_cache(&kmalloc_caches[2],
 				"kmalloc-192", 192, GFP_NOWAIT);
+#ifdef CONFIG_BEANCOUNTERS
+		create_kmalloc_cache(&ub_kmalloc_caches[2],
+				"kmalloc-192-ubc", 192, GFP_NOWAIT | __GFP_UBC);
+#endif
 		caches++;
 	}
 
 	for (i = KMALLOC_SHIFT_LOW; i < SLUB_PAGE_SHIFT; i++) {
 		create_kmalloc_cache(&kmalloc_caches[i],
 			"kmalloc", 1 << i, GFP_NOWAIT);
+#ifdef CONFIG_BEANCOUNTERS
+		create_kmalloc_cache(&ub_kmalloc_caches[i],
+			"kmalloc-ubc", 1 << i, GFP_NOWAIT | __GFP_UBC);
+#endif
 		caches++;
 	}
 
@@ -3255,9 +3415,14 @@ void __init kmem_cache_init(void)
 	slab_state = UP;
 
 	/* Provide the correct kmalloc names now that the caches are up */
-	for (i = KMALLOC_SHIFT_LOW; i < SLUB_PAGE_SHIFT; i++)
+	for (i = KMALLOC_SHIFT_LOW; i < SLUB_PAGE_SHIFT; i++) {
 		kmalloc_caches[i]. name =
 			kasprintf(GFP_NOWAIT, "kmalloc-%d", 1 << i);
+#ifdef CONFIG_BEANCOUNTERS
+		ub_kmalloc_caches[i].name =
+			kasprintf(GFP_NOWAIT | __GFP_UBC, "kmalloc-%d-ubc", 1 << i);
+#endif
+	}
 
 #ifdef CONFIG_SMP
 	register_cpu_notifier(&slab_notifier);
@@ -4555,6 +4720,8 @@ static char *create_unique_id(struct kmem_cache *s)
 		*p++ = 'a';
 	if (s->flags & SLAB_DEBUG_FREE)
 		*p++ = 'F';
+	if (s->flags & SLAB_UBC)
+		*p++ = 'b';
 	if (!(s->flags & SLAB_NOTRACK))
 		*p++ = 't';
 	if (p != name + 1)

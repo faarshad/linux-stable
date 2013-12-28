@@ -606,7 +606,9 @@ static void __rpc_execute(struct rpc_task *task)
 	struct rpc_wait_queue *queue;
 	int task_is_async = RPC_IS_ASYNC(task);
 	int status = 0;
+	struct ve_struct *env;
 
+	env = set_exec_env(task->tk_client->cl_xprt->owner_env);
 	dprintk("RPC: %5u __rpc_execute flags=0x%x\n",
 			task->tk_pid, task->tk_flags);
 
@@ -662,8 +664,10 @@ static void __rpc_execute(struct rpc_task *task)
 		}
 		rpc_clear_running(task);
 		spin_unlock_bh(&queue->lock);
-		if (task_is_async)
+		if (task_is_async) {
+			(void)set_exec_env(env);
 			return;
+		}
 
 		/* sync task: sleep here */
 		dprintk("RPC: %5u sync task going to sleep\n", task->tk_pid);
@@ -690,6 +694,7 @@ static void __rpc_execute(struct rpc_task *task)
 			task->tk_status);
 	/* Release all resources associated with the task */
 	rpc_release_task(task);
+	(void)set_exec_env(env);
 }
 
 /*

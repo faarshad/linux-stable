@@ -21,6 +21,9 @@
 
 #include <asm/pgtable.h>
 
+#include <bc/vmpages.h>
+#include <bc/io_acct.h>
+
 /*
  * swapper_space is a fiction, retained to simplify the path through
  * vmscan's shrink_page_list, to make sync_page look nicer, and to allow
@@ -46,6 +49,7 @@ struct address_space swapper_space = {
 	.i_mmap_nonlinear = LIST_HEAD_INIT(swapper_space.i_mmap_nonlinear),
 	.backing_dev_info = &swap_backing_dev_info,
 };
+EXPORT_SYMBOL(swapper_space);
 
 #define INC_CACHE_INFO(x)	do { swap_cache_info.x++; } while (0)
 
@@ -70,7 +74,7 @@ void show_swap_cache_info(void)
  * __add_to_swap_cache resembles add_to_page_cache_locked on swapper_space,
  * but sets SwapCache flag and private instead of mapping and index.
  */
-static int __add_to_swap_cache(struct page *page, swp_entry_t entry)
+int __add_to_swap_cache(struct page *page, swp_entry_t entry)
 {
 	int error;
 
@@ -119,6 +123,8 @@ int add_to_swap_cache(struct page *page, swp_entry_t entry, gfp_t gfp_mask)
 	return error;
 }
 
+EXPORT_SYMBOL(add_to_swap_cache);
+
 /*
  * This must be called only on pages that have
  * been verified to be in the swap cache.
@@ -148,11 +154,18 @@ int add_to_swap(struct page *page)
 {
 	swp_entry_t entry;
 	int err;
+	struct user_beancounter *ub;
 
 	VM_BUG_ON(!PageLocked(page));
 	VM_BUG_ON(!PageUptodate(page));
 
-	entry = get_swap_page();
+
+	ub = pb_grab_page_ub(page);
+	if (IS_ERR(ub))
+		return 0;
+
+	entry = get_swap_page(ub);
+	put_beancounter(ub);
 	if (!entry.val)
 		return 0;
 
@@ -347,6 +360,8 @@ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		page_cache_release(new_page);
 	return found_page;
 }
+
+EXPORT_SYMBOL(read_swap_cache_async);
 
 /**
  * swapin_readahead - swap in pages in hope we need them soon

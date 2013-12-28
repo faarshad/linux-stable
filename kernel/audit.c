@@ -662,6 +662,9 @@ static int audit_receive_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 	char			*ctx = NULL;
 	u32			len;
 
+	if (!ve_is_super(skb->owner_env))
+		return -ECONNREFUSED;
+
 	err = audit_netlink_ok(skb, msg_type);
 	if (err)
 		return err;

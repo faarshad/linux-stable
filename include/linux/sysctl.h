@@ -490,6 +490,7 @@ enum
 	NET_IPV4_CONF_PROMOTE_SECONDARIES=20,
 	NET_IPV4_CONF_ARP_ACCEPT=21,
 	NET_IPV4_CONF_ARP_NOTIFY=22,
+	NET_IPV4_CONF_SRC_VMARK=24,
 	__NET_IPV4_CONF_MAX
 };
 
@@ -1102,9 +1103,14 @@ struct ctl_table_header *__register_sysctl_paths(
 struct ctl_table_header *register_sysctl_table(struct ctl_table * table);
 struct ctl_table_header *register_sysctl_paths(const struct ctl_path *path,
 						struct ctl_table *table);
+struct ctl_table_header *register_sysctl_glob_table(struct ctl_table *, int);
+struct ctl_table_header *register_sysctl_glob_paths(const struct ctl_path *,
+						struct ctl_table *, int);
 
 void unregister_sysctl_table(struct ctl_table_header * table);
 int sysctl_check_table(struct nsproxy *namespaces, struct ctl_table *table);
+
+extern int ve_allow_kthreads;
 
 #endif /* __KERNEL__ */
 

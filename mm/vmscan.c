@@ -41,10 +41,14 @@
 #include <linux/delayacct.h>
 #include <linux/sysctl.h>
 
+#include <bc/oom_kill.h>
+#include <bc/io_acct.h>
+
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
 
 #include <linux/swapops.h>
+#include <linux/vzstat.h>
 
 #include "internal.h"
 
@@ -210,6 +214,9 @@ unsigned long shrink_slab(unsigned long scanned, gfp_t gfp_mask,
 	if (scanned == 0)
 		scanned = SWAP_CLUSTER_MAX;
 
+	if (unlikely(test_tsk_thread_flag(current, TIF_MEMDIE)))
+		return 1;
+
 	if (!down_read_trylock(&shrinker_rwsem))
 		return 1;	/* Assume we'll be able to shrink next time */
 
@@ -245,6 +252,9 @@ unsigned long shrink_slab(unsigned long scanned, gfp_t gfp_mask,
 			int shrink_ret;
 			int nr_before;
 
+			if (unlikely(test_tsk_thread_flag(current, TIF_MEMDIE)))
+				goto done;
+
 			nr_before = (*shrinker->shrink)(0, gfp_mask);
 			shrink_ret = (*shrinker->shrink)(this_scan, gfp_mask);
 			if (shrink_ret == -1)
@@ -259,6 +269,7 @@ unsigned long shrink_slab(unsigned long scanned, gfp_t gfp_mask,
 
 		shrinker->nr += total_scan;
 	}
+done:
 	up_read(&shrinker_rwsem);
 	return ret;
 }
@@ -376,6 +387,7 @@ static pageout_t pageout(struct page *page, struct address_space *mapping,
 		 */
 		if (page_has_private(page)) {
 			if (try_to_free_buffers(page)) {
+				ub_io_release_context(page, 0);
 				ClearPageDirty(page);
 				printk("%s: orphaned page\n", __func__);
 				return PAGE_CLEAN;
@@ -1321,6 +1333,7 @@ static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
 	struct zone_reclaim_stat *reclaim_stat = get_reclaim_stat(zone, sc);
 	unsigned long nr_rotated = 0;
 
+	{KSTAT_PERF_ENTER(refill_inact)
 	lru_add_drain();
 	spin_lock_irq(&zone->lru_lock);
 	nr_taken = sc->isolate_pages(nr_pages, &l_hold, &pgscanned, sc->order,
@@ -1394,6 +1407,7 @@ static void shrink_active_list(unsigned long nr_pages, struct zone *zone,
 						LRU_BASE   + file * LRU_FILE);
 	__mod_zone_page_state(zone, NR_ISOLATED_ANON + file, -nr_taken);
 	spin_unlock_irq(&zone->lru_lock);
+	KSTAT_PERF_LEAVE(refill_inact)}
 }
 
 static int inactive_anon_is_low_global(struct zone *zone)
@@ -1464,20 +1478,26 @@ static int inactive_file_is_low(struct zone *zone, struct scan_control *sc)
 	return low;
 }
 
+static int inactive_list_is_low(struct zone *zone, struct scan_control *sc,
+				int file)
+{
+	if (file)
+		return inactive_file_is_low(zone, sc);
+	else
+		return inactive_anon_is_low(zone, sc);
+}
+
 static unsigned long shrink_list(enum lru_list lru, unsigned long nr_to_scan,
 	struct zone *zone, struct scan_control *sc, int priority)
 {
 	int file = is_file_lru(lru);
 
-	if (lru == LRU_ACTIVE_FILE && inactive_file_is_low(zone, sc)) {
-		shrink_active_list(nr_to_scan, zone, sc, priority, file);
+	if (is_active_lru(lru)) {
+		if (inactive_list_is_low(zone, sc, file))
+		    shrink_active_list(nr_to_scan, zone, sc, priority, file);
 		return 0;
 	}
 
-	if (lru == LRU_ACTIVE_ANON && inactive_anon_is_low(zone, sc)) {
-		shrink_active_list(nr_to_scan, zone, sc, priority, file);
-		return 0;
-	}
 	return shrink_inactive_list(nr_to_scan, zone, sc, priority, file);
 }
 
@@ -1630,6 +1650,8 @@ static void shrink_zone(int priority, struct zone *zone,
 				nr_reclaimed += shrink_list(l, nr_to_scan,
 							    zone, sc, priority);
 			}
+			if (unlikely(test_tsk_thread_flag(current, TIF_MEMDIE)))
+				return;
 		}
 		/*
 		 * On large memory systems, scan >> priority can become
@@ -1708,6 +1730,9 @@ static void shrink_zones(int priority, struct zonelist *zonelist,
 		}
 
 		shrink_zone(priority, zone, sc);
+
+		if (unlikely(test_tsk_thread_flag(current, TIF_MEMDIE)))
+			break;
 	}
 }
 
@@ -1739,10 +1764,13 @@ static unsigned long do_try_to_free_pages(struct zonelist *zonelist,
 	struct zone *zone;
 	enum zone_type high_zoneidx = gfp_zone(sc->gfp_mask);
 
+	KSTAT_PERF_ENTER(ttfp);
 	delayacct_freepages_start();
 
 	if (scanning_global_lru(sc))
 		count_vm_event(ALLOCSTALL);
+
+	ub_oom_start();
 	/*
 	 * mem_cgroup will not do shrink_slab.
 	 */
@@ -1791,6 +1819,11 @@ static unsigned long do_try_to_free_pages(struct zonelist *zonelist,
 			sc->may_writepage = 1;
 		}
 
+		if (unlikely(test_tsk_thread_flag(current, TIF_MEMDIE))) {
+			ret = 1;
+			goto out;
+		}
+
 		/* Take a nap, wait for some writeback to complete */
 		if (sc->nr_scanned && priority < DEF_PRIORITY - 2)
 			congestion_wait(BLK_RW_ASYNC, HZ/10);
@@ -1822,6 +1855,7 @@ out:
 
 	delayacct_freepages_end();
 
+	KSTAT_PERF_LEAVE(ttfp);
 	return ret;
 }
 

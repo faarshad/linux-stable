@@ -81,6 +81,8 @@ void nf_conntrack_expect_fini(struct net *net);
 struct nf_conntrack_expect *
 __nf_ct_expect_find(struct net *net, const struct nf_conntrack_tuple *tuple);
 
+void nf_ct_expect_insert(struct nf_conntrack_expect *exp);
+
 struct nf_conntrack_expect *
 nf_ct_expect_find_get(struct net *net, const struct nf_conntrack_tuple *tuple);
 

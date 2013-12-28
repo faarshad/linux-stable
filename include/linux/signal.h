@@ -6,6 +6,8 @@
 
 #ifdef __KERNEL__
 #include <linux/list.h>
+#include <linux/spinlock.h>
+#include <linux/slab.h>
 
 /*
  * Real Time signals may be queued.
@@ -16,6 +18,9 @@ struct sigqueue {
 	int flags;
 	siginfo_t info;
 	struct user_struct *user;
+#ifdef CONFIG_BEANCOUNTERS
+	struct user_beancounter *sig_ub;
+#endif
 };
 
 /* flags values. */
@@ -375,6 +380,8 @@ int unhandled_signal(struct task_struct *tsk, int sig);
 	 (t)->sighand->action[(signr)-1].sa.sa_handler == SIG_DFL)
 
 void signals_init(void);
+
+extern struct kmem_cache *sigqueue_cachep;
 
 #endif /* __KERNEL__ */
 

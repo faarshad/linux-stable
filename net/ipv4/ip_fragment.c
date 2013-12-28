@@ -186,10 +186,13 @@ static void ip_evictor(struct net *net)
  */
 static void ip_expire(unsigned long arg)
 {
+	struct inet_frag_queue *q = (struct inet_frag_queue *)arg;
 	struct ipq *qp;
 	struct net *net;
+	struct ve_struct *old_ve;
 
-	qp = container_of((struct inet_frag_queue *) arg, struct ipq, q);
+	qp = container_of(q, struct ipq, q);
+	old_ve = set_exec_env(q->owner_ve);
 	net = container_of(qp->q.net, struct net, ipv4.frags);
 
 	spin_lock(&qp->q.lock);
@@ -214,6 +217,8 @@ static void ip_expire(unsigned long arg)
 out:
 	spin_unlock(&qp->q.lock);
 	ipq_put(qp);
+
+	(void)set_exec_env(old_ve);
 }
 
 /* Find the correct entry in the "incomplete datagrams" queue for
@@ -525,6 +530,7 @@ static int ip_frag_reasm(struct ipq *qp, struct sk_buff *prev,
 		clone->csum = 0;
 		clone->ip_summed = head->ip_summed;
 		atomic_add(clone->truesize, &qp->q.net->mem);
+		clone->owner_env = head->owner_env;
 	}
 
 	skb_shinfo(head)->frag_list = head->next;

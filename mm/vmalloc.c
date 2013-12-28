@@ -31,6 +31,9 @@
 #include <asm/tlbflush.h>
 #include <asm/shmparam.h>
 
+#include <bc/kmem.h>
+#include <bc/debug.h>
+
 
 /*** Page table manipulation functions ***/
 
@@ -509,6 +512,9 @@ static unsigned long lazy_max_pages(void)
 
 static atomic_t vmap_lazy_nr = ATOMIC_INIT(0);
 
+/* for per-CPU blocks */
+static void purge_fragmented_blocks_allcpus(void);
+
 /*
  * Purges all lazily-freed vmap areas.
  *
@@ -539,6 +545,9 @@ static void __purge_vmap_area_lazy(unsigned long *start, unsigned long *end,
 	} else
 		spin_lock(&purge_lock);
 
+	if (sync)
+		purge_fragmented_blocks_allcpus();
+
 	rcu_read_lock();
 	list_for_each_entry_rcu(va, &vmap_area_list, list) {
 		if (va->flags & VM_LAZY_FREE) {
@@ -555,10 +564,8 @@ static void __purge_vmap_area_lazy(unsigned long *start, unsigned long *end,
 	}
 	rcu_read_unlock();
 
-	if (nr) {
-		BUG_ON(nr > atomic_read(&vmap_lazy_nr));
+	if (nr)
 		atomic_sub(nr, &vmap_lazy_nr);
-	}
 
 	if (nr || force_flush)
 		flush_tlb_kernel_range(*start, *end);
@@ -669,8 +676,6 @@ static bool vmap_initialized __read_mostly = false;
 struct vmap_block_queue {
 	spinlock_t lock;
 	struct list_head free;
-	struct list_head dirty;
-	unsigned int nr_dirty;
 };
 
 struct vmap_block {
@@ -680,10 +685,9 @@ struct vmap_block {
 	unsigned long free, dirty;
 	DECLARE_BITMAP(alloc_map, VMAP_BBMAP_BITS);
 	DECLARE_BITMAP(dirty_map, VMAP_BBMAP_BITS);
-	union {
-		struct list_head free_list;
-		struct rcu_head rcu_head;
-	};
+	struct list_head free_list;
+	struct rcu_head rcu_head;
+	struct list_head purge;
 };
 
 /* Queue of free and dirty vmap blocks, for allocation and flushing purposes */
@@ -759,7 +763,7 @@ static struct vmap_block *new_vmap_block(gfp_t gfp_mask)
 	vbq = &get_cpu_var(vmap_block_queue);
 	vb->vbq = vbq;
 	spin_lock(&vbq->lock);
-	list_add(&vb->free_list, &vbq->free);
+	list_add_rcu(&vb->free_list, &vbq->free);
 	spin_unlock(&vbq->lock);
 	put_cpu_var(vmap_cpu_blocks);
 
@@ -778,8 +782,6 @@ static void free_vmap_block(struct vmap_block *vb)
 	struct vmap_block *tmp;
 	unsigned long vb_idx;
 
-	BUG_ON(!list_empty(&vb->free_list));
-
 	vb_idx = addr_to_vb_idx(vb->va->va_start);
 	spin_lock(&vmap_block_tree_lock);
 	tmp = radix_tree_delete(&vmap_block_tree, vb_idx);
@@ -790,12 +792,61 @@ static void free_vmap_block(struct vmap_block *vb)
 	call_rcu(&vb->rcu_head, rcu_free_vb);
 }
 
+static void purge_fragmented_blocks(int cpu)
+{
+	LIST_HEAD(purge);
+	struct vmap_block *vb;
+	struct vmap_block *n_vb;
+	struct vmap_block_queue *vbq = &per_cpu(vmap_block_queue, cpu);
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(vb, &vbq->free, free_list) {
+
+		if (!(vb->free + vb->dirty == VMAP_BBMAP_BITS && vb->dirty != VMAP_BBMAP_BITS))
+			continue;
+
+		spin_lock(&vb->lock);
+		if (vb->free + vb->dirty == VMAP_BBMAP_BITS && vb->dirty != VMAP_BBMAP_BITS) {
+			vb->free = 0; /* prevent further allocs after releasing lock */
+			vb->dirty = VMAP_BBMAP_BITS; /* prevent purging it again */
+			bitmap_fill(vb->alloc_map, VMAP_BBMAP_BITS);
+			bitmap_fill(vb->dirty_map, VMAP_BBMAP_BITS);
+			spin_lock(&vbq->lock);
+			list_del_rcu(&vb->free_list);
+			spin_unlock(&vbq->lock);
+			spin_unlock(&vb->lock);
+			list_add_tail(&vb->purge, &purge);
+		} else
+			spin_unlock(&vb->lock);
+	}
+	rcu_read_unlock();
+
+	list_for_each_entry_safe(vb, n_vb, &purge, purge) {
+		list_del(&vb->purge);
+		free_vmap_block(vb);
+	}
+}
+
+static void purge_fragmented_blocks_thiscpu(void)
+{
+	purge_fragmented_blocks(smp_processor_id());
+}
+
+static void purge_fragmented_blocks_allcpus(void)
+{
+	int cpu;
+
+	for_each_possible_cpu(cpu)
+		purge_fragmented_blocks(cpu);
+}
+
 static void *vb_alloc(unsigned long size, gfp_t gfp_mask)
 {
 	struct vmap_block_queue *vbq;
 	struct vmap_block *vb;
 	unsigned long addr = 0;
 	unsigned int order;
+	int purge = 0;
 
 	BUG_ON(size & ~PAGE_MASK);
 	BUG_ON(size > PAGE_SIZE*VMAP_MAX_ALLOC);
@@ -808,24 +859,37 @@ again:
 		int i;
 
 		spin_lock(&vb->lock);
+		if (vb->free < 1UL << order)
+			goto next;
 		i = bitmap_find_free_region(vb->alloc_map,
 						VMAP_BBMAP_BITS, order);
 
-		if (i >= 0) {
-			addr = vb->va->va_start + (i << PAGE_SHIFT);
-			BUG_ON(addr_to_vb_idx(addr) !=
-					addr_to_vb_idx(vb->va->va_start));
-			vb->free -= 1UL << order;
-			if (vb->free == 0) {
-				spin_lock(&vbq->lock);
-				list_del_init(&vb->free_list);
-				spin_unlock(&vbq->lock);
+		if (i < 0) {
+			if (vb->free + vb->dirty == VMAP_BBMAP_BITS) {
+				/* fragmented and no outstanding allocations */
+				BUG_ON(vb->dirty != VMAP_BBMAP_BITS);
+				purge = 1;
 			}
-			spin_unlock(&vb->lock);
-			break;
+			goto next;
+		}
+		addr = vb->va->va_start + (i << PAGE_SHIFT);
+		BUG_ON(addr_to_vb_idx(addr) !=
+				addr_to_vb_idx(vb->va->va_start));
+		vb->free -= 1UL << order;
+		if (vb->free == 0) {
+			spin_lock(&vbq->lock);
+			list_del_rcu(&vb->free_list);
+			spin_unlock(&vbq->lock);
 		}
 		spin_unlock(&vb->lock);
+		break;
+next:
+		spin_unlock(&vb->lock);
 	}
+
+	if (purge)
+		purge_fragmented_blocks_thiscpu();
+
 	put_cpu_var(vmap_cpu_blocks);
 	rcu_read_unlock();
 
@@ -862,11 +926,11 @@ static void vb_free(const void *addr, unsigned long size)
 	BUG_ON(!vb);
 
 	spin_lock(&vb->lock);
-	bitmap_allocate_region(vb->dirty_map, offset >> PAGE_SHIFT, order);
+	BUG_ON(bitmap_allocate_region(vb->dirty_map, offset >> PAGE_SHIFT, order));
 
 	vb->dirty += 1UL << order;
 	if (vb->dirty == VMAP_BBMAP_BITS) {
-		BUG_ON(vb->free || !list_empty(&vb->free_list));
+		BUG_ON(vb->free);
 		spin_unlock(&vb->lock);
 		free_vmap_block(vb);
 	} else
@@ -1035,8 +1099,6 @@ void __init vmalloc_init(void)
 		vbq = &per_cpu(vmap_block_queue, i);
 		spin_lock_init(&vbq->lock);
 		INIT_LIST_HEAD(&vbq->free);
-		INIT_LIST_HEAD(&vbq->dirty);
-		vbq->nr_dirty = 0;
 	}
 
 	/* Import existing vmlist entries. */
@@ -1290,7 +1352,7 @@ struct vm_struct *remove_vm_area(const void *addr)
 	return NULL;
 }
 
-static void __vunmap(const void *addr, int deallocate_pages)
+static void __vunmap(const void *addr, int deallocate_pages, int uncharge)
 {
 	struct vm_struct *area;
 
@@ -1315,6 +1377,8 @@ static void __vunmap(const void *addr, int deallocate_pages)
 	if (deallocate_pages) {
 		int i;
 
+		if (uncharge)
+			dec_vmalloc_charged(area);
 		for (i = 0; i < area->nr_pages; i++) {
 			struct page *page = area->pages[i];
 
@@ -1348,7 +1412,7 @@ void vfree(const void *addr)
 
 	kmemleak_free(addr);
 
-	__vunmap(addr, 1);
+	__vunmap(addr, 1, 1);
 }
 EXPORT_SYMBOL(vfree);
 
@@ -1365,7 +1429,7 @@ void vunmap(const void *addr)
 {
 	BUG_ON(in_interrupt());
 	might_sleep();
-	__vunmap(addr, 0);
+	__vunmap(addr, 0, 0);
 }
 EXPORT_SYMBOL(vunmap);
 
@@ -1452,10 +1516,12 @@ static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 
 	if (map_vm_area(area, prot, &pages))
 		goto fail;
+
+	inc_vmalloc_charged(area, gfp_mask);
 	return area->addr;
 
 fail:
-	vfree(area->addr);
+	__vunmap(area->addr, 1, 0);
 	return NULL;
 }
 
@@ -1540,6 +1606,26 @@ void *vmalloc(unsigned long size)
 }
 EXPORT_SYMBOL(vmalloc);
 
+void *ub_vmalloc(unsigned long size)
+{
+	return __vmalloc(size, GFP_KERNEL_UBC | __GFP_HIGHMEM, PAGE_KERNEL);
+}
+EXPORT_SYMBOL(ub_vmalloc);
+
+void *vmalloc_best(unsigned long size)
+{
+	return vmalloc(size);
+}
+
+EXPORT_SYMBOL(vmalloc_best);
+
+void *ub_vmalloc_best(unsigned long size)
+{
+	return ub_vmalloc(size);
+}
+
+EXPORT_SYMBOL(ub_vmalloc_best);
+
 /**
  * vmalloc_user - allocate zeroed virtually contiguous memory for userspace
  * @size: allocation size
@@ -1580,6 +1666,13 @@ void *vmalloc_node(unsigned long size, int node)
 					node, __builtin_return_address(0));
 }
 EXPORT_SYMBOL(vmalloc_node);
+
+void *ub_vmalloc_node(unsigned long size, int node)
+{
+	return __vmalloc_node(size, 1, GFP_KERNEL_UBC | __GFP_HIGHMEM, PAGE_KERNEL,
+					node, __builtin_return_address(0));
+}
+EXPORT_SYMBOL(ub_vmalloc_node);
 
 #ifndef PAGE_KERNEL_EXEC
 # define PAGE_KERNEL_EXEC PAGE_KERNEL
@@ -1993,6 +2086,7 @@ void free_vm_area(struct vm_struct *area)
 }
 EXPORT_SYMBOL_GPL(free_vm_area);
 
+#ifndef CONFIG_HAVE_LEGACY_PER_CPU_AREA
 static struct vmap_area *node_to_va(struct rb_node *n)
 {
 	return n ? rb_entry(n, struct vmap_area, rb_node) : NULL;
@@ -2257,6 +2351,7 @@ err_free:
 	kfree(vms);
 	return NULL;
 }
+#endif
 
 /**
  * pcpu_free_vm_areas - free vmalloc areas for percpu allocator
@@ -2272,6 +2367,40 @@ void pcpu_free_vm_areas(struct vm_struct **vms, int nr_vms)
 	for (i = 0; i < nr_vms; i++)
 		free_vm_area(vms[i]);
 	kfree(vms);
+}
+
+void vprintstat(void)
+{
+	struct vm_struct *p, *last_p = NULL;
+	unsigned long addr, size, free_size, max_free_size;
+	int num;
+
+	addr = VMALLOC_START;
+	size = max_free_size = 0;
+	num = 0;
+
+	read_lock(&vmlist_lock);
+	for (p = vmlist; p; p = p->next) {
+		free_size = (unsigned long)p->addr - addr;
+		if (free_size > max_free_size)
+			max_free_size = free_size;
+		addr = (unsigned long)p->addr + p->size;
+		size += p->size;
+		++num;
+		last_p = p;
+	}
+	if (last_p) {
+		free_size = VMALLOC_END -
+			((unsigned long)last_p->addr + last_p->size);
+		if (free_size > max_free_size)
+			max_free_size = free_size;
+	}
+	read_unlock(&vmlist_lock);
+
+	printk("VMALLOC Used: %luKB Total: %luKB Entries: %d\n"
+		"    Max_Free: %luKB Start: %lx End: %lx\n",
+		size/1024, (VMALLOC_END - VMALLOC_START)/1024, num,
+		max_free_size/1024, VMALLOC_START, VMALLOC_END);
 }
 
 #ifdef CONFIG_PROC_FS

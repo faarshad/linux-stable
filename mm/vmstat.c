@@ -15,6 +15,7 @@
 #include <linux/cpu.h>
 #include <linux/vmstat.h>
 #include <linux/sched.h>
+#include <linux/virtinfo.h>
 
 #ifdef CONFIG_VM_EVENT_COUNTERS
 DEFINE_PER_CPU(struct vm_event_state, vm_event_states) = {{0}};
@@ -35,6 +36,20 @@ static void sum_vm_events(unsigned long *ret, const struct cpumask *cpumask)
 	}
 }
 
+unsigned long vm_events(enum vm_event_item i)
+{
+	int cpu;
+	unsigned long sum;
+	struct vm_event_state *st;
+
+	sum = 0;
+	for_each_online_cpu(cpu) {
+		st = &per_cpu(vm_event_states, cpu);
+		sum += st->event[i];
+	}
+
+	return (sum < 0 ? 0 : sum);
+}
 /*
  * Accumulate the vm event counters across all CPUs.
  * The result is unavoidably approximate - it can change
@@ -800,30 +815,40 @@ static void *vmstat_start(struct seq_file *m, loff_t *pos)
 	unsigned long *v;
 #ifdef CONFIG_VM_EVENT_COUNTERS
 	unsigned long *e;
+#define VMSTAT_BUFSIZE	(NR_VM_ZONE_STAT_ITEMS * sizeof(unsigned long) + \
+				sizeof(struct vm_event_state))
+#else
+#define VMSTAT_BUFSIZE	(NR_VM_ZONE_STAT_ITEMS * sizeof(unsigned long))
 #endif
 	int i;
 
 	if (*pos >= ARRAY_SIZE(vmstat_text))
 		return NULL;
 
-#ifdef CONFIG_VM_EVENT_COUNTERS
-	v = kmalloc(NR_VM_ZONE_STAT_ITEMS * sizeof(unsigned long)
-			+ sizeof(struct vm_event_state), GFP_KERNEL);
-#else
-	v = kmalloc(NR_VM_ZONE_STAT_ITEMS * sizeof(unsigned long),
-			GFP_KERNEL);
-#endif
+	v = kmalloc(VMSTAT_BUFSIZE, GFP_KERNEL);
 	m->private = v;
 	if (!v)
 		return ERR_PTR(-ENOMEM);
-	for (i = 0; i < NR_VM_ZONE_STAT_ITEMS; i++)
-		v[i] = global_page_state(i);
+
+	if (ve_is_super(get_exec_env())) {
+		for (i = 0; i < NR_VM_ZONE_STAT_ITEMS; i++)
+			v[i] = global_page_state(i);
 #ifdef CONFIG_VM_EVENT_COUNTERS
-	e = v + NR_VM_ZONE_STAT_ITEMS;
-	all_vm_events(e);
-	e[PGPGIN] /= 2;		/* sectors -> kbytes */
-	e[PGPGOUT] /= 2;
+		e = v + NR_VM_ZONE_STAT_ITEMS;
+		all_vm_events(e);
+		e[PGPGIN] /= 2;		/* sectors -> kbytes */
+		e[PGPGOUT] /= 2;
 #endif
+	} else
+		memset(v, 0, VMSTAT_BUFSIZE);
+
+	if (virtinfo_notifier_call(VITYPE_GENERAL,
+				VIRTINFO_VMSTAT, v) & NOTIFY_FAIL) {
+		kfree(v);
+		m->private = NULL;
+		return ERR_PTR(-ENOMSG);
+	}
+
 	return v + *pos;
 }
 
@@ -942,7 +967,7 @@ static int __init setup_vmstat(void)
 #ifdef CONFIG_PROC_FS
 	proc_create("buddyinfo", S_IRUGO, NULL, &fragmentation_file_operations);
 	proc_create("pagetypeinfo", S_IRUGO, NULL, &pagetypeinfo_file_ops);
-	proc_create("vmstat", S_IRUGO, NULL, &proc_vmstat_file_operations);
+	proc_create("vmstat", S_IRUGO, &glob_proc_root, &proc_vmstat_file_operations);
 	proc_create("zoneinfo", S_IRUGO, NULL, &proc_zoneinfo_file_operations);
 #endif
 	return 0;

@@ -3,7 +3,7 @@
 # These targets are used from top-level makefile
 
 PHONY += oldconfig xconfig gconfig menuconfig config silentoldconfig update-po-config \
-	localmodconfig localyesconfig
+	localmodconfig localyesconfig nonint_oldconfig
 
 ifdef KBUILD_KCONFIG
 Kconfig := $(KBUILD_KCONFIG)
@@ -57,6 +57,9 @@ localyesconfig: $(obj)/streamline_config.pl $(obj)/conf
 			$(obj)/conf -s $(Kconfig);		\
 	fi
 	$(Q)rm -f .tmp.config
+
+nonint_oldconfig: $(obj)/conf
+	$< -b $(Kconfig)
 
 # Create new linux.pot file
 # Adjust charset to UTF-8 in .po file to accept UTF-8 in Kconfig files

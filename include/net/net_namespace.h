@@ -53,6 +53,13 @@ struct net {
 	struct hlist_head 	*dev_name_head;
 	struct hlist_head	*dev_index_head;
 
+	int			ifindex;
+
+#ifdef CONFIG_VE
+	struct completion	*sysfs_completion;
+	struct ve_struct	*owner_ve;
+#endif
+
 	/* core fib_rules */
 	struct list_head	rules_ops;
 	spinlock_t		rules_mod_lock;

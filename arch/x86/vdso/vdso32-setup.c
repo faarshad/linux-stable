@@ -17,6 +17,8 @@
 #include <linux/err.h>
 #include <linux/module.h>
 
+#include <bc/vmpages.h>
+
 #include <asm/cpufeature.h>
 #include <asm/msr.h>
 #include <asm/pgtable.h>
@@ -37,6 +39,8 @@ enum {
 #else
 #define VDSO_DEFAULT	VDSO_ENABLED
 #endif
+#undef VDSO_DEFAULT
+#define VDSO_DEFAULT VDSO_DISABLED
 
 #ifdef CONFIG_X86_64
 #define vdso_enabled			sysctl_vsyscall32
@@ -193,7 +197,8 @@ static __init void relocate_vdso(Elf32_Ehdr *ehdr)
 	}
 }
 
-static struct page *vdso32_pages[1];
+struct page *vdso32_pages[1];
+EXPORT_SYMBOL_GPL(vdso32_pages);
 
 #ifdef CONFIG_X86_64
 
@@ -309,16 +314,30 @@ int __init sysenter_setup(void)
 	return 0;
 }
 
+EXPORT_SYMBOL_GPL(VDSO32_SYSENTER_RETURN);
+EXPORT_SYMBOL_GPL(VDSO32_PRELINK);
+
 /* Setup a VMA at program startup for the vsyscall page */
-int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
+int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp,
+				unsigned long map_address)
 {
 	struct mm_struct *mm = current->mm;
-	unsigned long addr;
+	unsigned long addr = map_address;
 	int ret = 0;
 	bool compat;
+	unsigned long flags;
 
-	if (vdso_enabled == VDSO_DISABLED)
+	if (vdso_enabled == VDSO_DISABLED && map_address == 0) {
+		current->mm->context.vdso = NULL;
 		return 0;
+	}
+
+	flags = VM_READ | VM_EXEC | VM_MAYREAD | VM_MAYEXEC | VM_MAYWRITE |
+		mm->def_flags;
+
+	ret = -ENOMEM;
+	if (ub_memory_charge(mm, PAGE_SIZE, flags, NULL, UB_SOFT))
+		goto err_charge;
 
 	down_write(&mm->mmap_sem);
 
@@ -328,19 +347,18 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
 
 	map_compat_vdso(compat);
 
-	if (compat)
-		addr = VDSO_HIGH_BASE;
-	else {
-		addr = get_unmapped_area(NULL, 0, PAGE_SIZE, 0, 0);
+	if (!compat || map_address) {
+		addr = get_unmapped_area(NULL, addr, PAGE_SIZE, 0, 0);
 		if (IS_ERR_VALUE(addr)) {
 			ret = addr;
 			goto up_fail;
 		}
-	}
+	} else
+		addr = VDSO_HIGH_BASE;
 
 	current->mm->context.vdso = (void *)addr;
 
-	if (compat_uses_vma || !compat) {
+	if (compat_uses_vma || !compat || map_address) {
 		/*
 		 * MAYWRITE to allow gdb to COW and set breakpoints
 		 *
@@ -368,9 +386,13 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
 		current->mm->context.vdso = NULL;
 
 	up_write(&mm->mmap_sem);
+	if (ret < 0)
+		ub_memory_uncharge(mm, PAGE_SIZE, flags, NULL);
+err_charge:
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(arch_setup_additional_pages);
 
 #ifdef CONFIG_X86_64
 

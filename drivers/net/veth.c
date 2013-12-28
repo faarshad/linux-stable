@@ -180,6 +180,7 @@ static netdev_tx_t veth_xmit(struct sk_buff *skb, struct net_device *dev)
 	skb->mark = 0;
 	secpath_reset(skb);
 	nf_reset(skb);
+	skb_init_brmark(skb);
 
 	length = skb->len;
 

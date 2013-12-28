@@ -3,6 +3,7 @@
 
 #include <linux/module.h>
 #include <linux/smp.h>
+#include <linux/syscalls.h>
 
 #include <net/checksum.h>
 
@@ -17,6 +18,7 @@
 EXPORT_SYMBOL(mcount);
 #endif
 
+EXPORT_SYMBOL(kernel_execve);
 EXPORT_SYMBOL(kernel_thread);
 
 EXPORT_SYMBOL(__get_user_1);

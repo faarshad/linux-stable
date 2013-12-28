@@ -13,6 +13,9 @@
 #include <linux/syscalls.h>
 #include <linux/err.h>
 #include <linux/acct.h>
+#include <linux/module.h>
+
+#include <bc/kmem.h>
 
 #define BITS_PER_PAGE		(PAGE_SIZE*8)
 
@@ -136,6 +139,156 @@ void free_pid_ns(struct kref *kref)
 		put_pid_ns(parent);
 }
 
+/*
+ * this is a dirty ugly hack.
+ */
+
+static int __pid_ns_attach_task(struct pid_namespace *ns,
+		struct task_struct *tsk, pid_t nr)
+{
+	struct pid *pid;
+	enum pid_type type;
+	unsigned long old_size, new_size;
+
+	pid = kmem_cache_alloc(ns->pid_cachep, GFP_KERNEL);
+	if (!pid)
+		goto out;
+
+	if (nr == 0)
+		nr = alloc_pidmap(ns);
+	else
+		nr = set_pidmap(ns, nr);
+
+	if (nr < 0)
+		goto out_free;
+
+	memcpy(pid, task_pid(tsk),
+		sizeof(struct pid) + (ns->level - 1) * sizeof(struct upid));
+	get_pid_ns(ns);
+	pid->level++;
+	BUG_ON(pid->level != ns->level);
+	pid->numbers[pid->level].nr = nr;
+	pid->numbers[pid->level].ns = ns;
+	atomic_set(&pid->count, 1);
+	for (type = 0; type < PIDTYPE_MAX; ++type)
+		INIT_HLIST_HEAD(&pid->tasks[type]);
+
+	old_size = kmem_cache_objuse(pid->numbers[pid->level - 1].ns->pid_cachep);
+	new_size = kmem_cache_objuse(pid->numbers[pid->level].ns->pid_cachep);
+	local_irq_disable();
+	/*
+	 * Depending on sizeof(struct foo), cache flags (redzoning, etc)
+	 * and actual CPU (cacheline_size() jump from 64 to 128 bytes after
+	 * CPU detection) new size can very well be smaller than old size.
+	 */
+	if (new_size > old_size) {
+		if (ub_kmemsize_charge(pid->ub, new_size - old_size, UB_HARD) < 0)
+			goto out_enable;
+	} else
+		ub_kmemsize_uncharge(pid->ub, old_size - new_size);
+
+	write_lock(&tasklist_lock);
+
+	spin_lock(&pidmap_lock);
+	reattach_pid(tsk, PIDTYPE_SID, pid);
+	reattach_pid(tsk, PIDTYPE_PGID, pid);
+	tsk->signal->leader_pid = pid;
+	current->signal->tty_old_pgrp = NULL;
+
+	reattach_pid(tsk, PIDTYPE_PID, pid);
+	spin_unlock(&pidmap_lock);
+
+	write_unlock_irq(&tasklist_lock);
+
+	return 0;
+
+out_enable:
+	local_irq_enable();
+	put_pid_ns(ns);
+out_free:
+	kmem_cache_free(ns->pid_cachep, pid);
+out:
+	return -ENOMEM;
+}
+
+int pid_ns_attach_task(struct pid_namespace *ns, struct task_struct *tsk)
+{
+	return __pid_ns_attach_task(ns, tsk, 0);
+}
+EXPORT_SYMBOL_GPL(pid_ns_attach_task);
+
+int pid_ns_attach_init(struct pid_namespace *ns, struct task_struct *tsk)
+{
+	int err;
+
+	err = __pid_ns_attach_task(ns, tsk, 1);
+	if (err < 0)
+		return err;
+
+	ns->child_reaper = tsk;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(pid_ns_attach_init);
+
+#ifdef CONFIG_VE
+static noinline void show_lost_task(struct task_struct *p)
+{
+	printk("Lost task: %d/%s/%p blocked: %lx pending: %lx\n",
+			p->pid, p->comm, p,
+			p->blocked.sig[0],
+			p->pending.signal.sig[0]);
+}
+
+static void zap_ve_processes(struct ve_struct *env)
+{
+	/*
+	 * Here the VE changes its state into "not running".
+	 * op_sem taken for write is a barrier to all VE manipulations from
+	 * ioctl: it waits for operations currently in progress and blocks all
+	 * subsequent operations until is_running is set to 0 and op_sem is
+	 * released.
+	 */
+	down_write(&env->op_sem);
+	env->is_running = 0;
+	up_write(&env->op_sem);
+
+	/* wait for all init childs exit */
+	while (atomic_read(&env->pcounter) > 1) {
+		struct task_struct *g, *p;
+		long delay = 1;
+
+		if (sys_wait4(-1, NULL, __WALL | WNOHANG, NULL) > 0)
+			continue;
+		/* it was ENOCHLD or no more children somehow */
+		if (atomic_read(&env->pcounter) == 1)
+			break;
+
+		/* clear all signals to avoid wakeups */
+		if (signal_pending(current))
+			flush_signals(current);
+		/* we have child without signal sent */
+		__set_current_state(TASK_INTERRUPTIBLE);
+		schedule_timeout(delay);
+		delay = (delay < HZ) ? (delay << 1) : HZ;
+		read_lock(&tasklist_lock);
+		do_each_thread_ve(g, p) {
+			if (p != current) {
+				/*
+				 * by that time no processes other then entered
+				 * may exist in the VE. if some were missed by
+				 * zap_pid_ns_processes() this was a BUG
+				 */
+				if (!p->did_ve_enter)
+					show_lost_task(p);
+
+				force_sig_specific(SIGKILL, p);
+			}
+		} while_each_thread_ve(g, p);
+		read_unlock(&tasklist_lock);
+	}
+}
+#endif
+
 void zap_pid_ns_processes(struct pid_namespace *pid_ns)
 {
 	int nr;
@@ -181,6 +334,11 @@ void zap_pid_ns_processes(struct pid_namespace *pid_ns)
 	} while (rc != -ECHILD);
 
 	acct_exit_ns(pid_ns);
+
+#ifdef CONFIG_VE
+	if (get_exec_env()->ve_ns->pid_ns == pid_ns)
+		zap_ve_processes(get_exec_env());
+#endif
 	return;
 }
 

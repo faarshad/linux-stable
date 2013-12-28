@@ -24,6 +24,9 @@
 
 extern struct cache_detail ip_map_cache, unix_gid_cache;
 
+extern void ve_sunrpc_hook_register(void);
+extern void ve_sunrpc_hook_unregister(void);
+
 static int __init
 init_sunrpc(void)
 {
@@ -46,6 +49,7 @@ init_sunrpc(void)
 	svc_init_xprt_sock();	/* svc sock transport */
 	init_socket_xprt();	/* clnt sock transport */
 	rpcauth_init_module();
+	ve_sunrpc_hook_register();
 out:
 	return err;
 }
@@ -53,6 +57,7 @@ out:
 static void __exit
 cleanup_sunrpc(void)
 {
+	ve_sunrpc_hook_unregister();
 	rpcauth_remove_module();
 	cleanup_socket_xprt();
 	svc_cleanup_xprt_sock();

@@ -23,6 +23,10 @@ struct vm_area_struct;		/* vma defining user mapping in mm_types.h */
 #define IOREMAP_MAX_ORDER	(7 + PAGE_SHIFT)	/* 128 pages */
 #endif
 
+/* align size to 2^n page boundary */
+#define POWER2_PAGE_ALIGN(size) \
+	((typeof(size))(1UL << (PAGE_SHIFT + get_order(size))))
+
 struct vm_struct {
 	struct vm_struct	*next;
 	void			*addr;
@@ -51,12 +55,16 @@ static inline void vmalloc_init(void)
 #endif
 
 extern void *vmalloc(unsigned long size);
+extern void *ub_vmalloc(unsigned long size);
 extern void *vmalloc_user(unsigned long size);
 extern void *vmalloc_node(unsigned long size, int node);
+extern void *ub_vmalloc_node(unsigned long size, int node);
 extern void *vmalloc_exec(unsigned long size);
 extern void *vmalloc_32(unsigned long size);
 extern void *vmalloc_32_user(unsigned long size);
 extern void *__vmalloc(unsigned long size, gfp_t gfp_mask, pgprot_t prot);
+extern void *vmalloc_best(unsigned long size);
+extern void *ub_vmalloc_best(unsigned long size);
 extern void *__vmalloc_area(struct vm_struct *area, gfp_t gfp_mask,
 				pgprot_t prot);
 extern void vfree(const void *addr);
@@ -68,6 +76,7 @@ extern void vunmap(const void *addr);
 extern int remap_vmalloc_range(struct vm_area_struct *vma, void *addr,
 							unsigned long pgoff);
 void vmalloc_sync_all(void);
+extern void vprintstat(void);
  
 /*
  *	Lowlevel-APIs (not for driver use!)
@@ -115,9 +124,11 @@ extern rwlock_t vmlist_lock;
 extern struct vm_struct *vmlist;
 extern __init void vm_area_register_early(struct vm_struct *vm, size_t align);
 
+#ifndef CONFIG_HAVE_LEGACY_PER_CPU_AREA
 struct vm_struct **pcpu_get_vm_areas(const unsigned long *offsets,
 				     const size_t *sizes, int nr_vms,
 				     size_t align, gfp_t gfp_mask);
+#endif
 
 void pcpu_free_vm_areas(struct vm_struct **vms, int nr_vms);
 

@@ -21,6 +21,8 @@
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
 
+#include <bc/beancounter.h>
+
 const struct file_operations generic_ro_fops = {
 	.llseek		= generic_file_llseek,
 	.read		= do_sync_read,
@@ -369,6 +371,29 @@ static inline void file_pos_write(struct file *file, loff_t pos)
 	file->f_pos = pos;
 }
 
+static inline void bc_acct_write(size_t bytes)
+{
+	struct user_beancounter *ub;
+
+	if (bytes > 0) {
+		ub = get_exec_ub();
+		ub_percpu_inc(ub, write);
+		ub_percpu_add(ub, wchar, bytes);
+	}
+}
+
+static inline void bc_acct_read(size_t bytes)
+{
+	struct user_beancounter *ub;
+
+	if (bytes > 0) {
+		ub = get_exec_ub();
+		ub_percpu_inc(ub, read);
+		ub_percpu_add(ub, rchar, bytes);
+	}
+}
+
+
 SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 {
 	struct file *file;
@@ -381,6 +406,8 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 		ret = vfs_read(file, buf, count, &pos);
 		file_pos_write(file, pos);
 		fput_light(file, fput_needed);
+
+		bc_acct_read(ret);
 	}
 
 	return ret;
@@ -399,6 +426,8 @@ SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 		ret = vfs_write(file, buf, count, &pos);
 		file_pos_write(file, pos);
 		fput_light(file, fput_needed);
+
+		bc_acct_write(ret);
 	}
 
 	return ret;
@@ -420,6 +449,8 @@ SYSCALL_DEFINE(pread64)(unsigned int fd, char __user *buf,
 		if (file->f_mode & FMODE_PREAD)
 			ret = vfs_read(file, buf, count, &pos);
 		fput_light(file, fput_needed);
+
+		bc_acct_read(ret);
 	}
 
 	return ret;
@@ -449,6 +480,8 @@ SYSCALL_DEFINE(pwrite64)(unsigned int fd, const char __user *buf,
 		if (file->f_mode & FMODE_PWRITE)  
 			ret = vfs_write(file, buf, count, &pos);
 		fput_light(file, fput_needed);
+
+		bc_acct_write(ret);
 	}
 
 	return ret;
@@ -702,6 +735,8 @@ SYSCALL_DEFINE3(readv, unsigned long, fd, const struct iovec __user *, vec,
 		ret = vfs_readv(file, vec, vlen, &pos);
 		file_pos_write(file, pos);
 		fput_light(file, fput_needed);
+
+		bc_acct_read(ret);
 	}
 
 	if (ret > 0)
@@ -723,6 +758,8 @@ SYSCALL_DEFINE3(writev, unsigned long, fd, const struct iovec __user *, vec,
 		ret = vfs_writev(file, vec, vlen, &pos);
 		file_pos_write(file, pos);
 		fput_light(file, fput_needed);
+
+		bc_acct_write(ret);
 	}
 
 	if (ret > 0)

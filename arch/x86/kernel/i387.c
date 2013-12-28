@@ -163,6 +163,7 @@ int init_fpu(struct task_struct *tsk)
 	set_stopped_child_used_math(tsk);
 	return 0;
 }
+EXPORT_SYMBOL(init_fpu);
 
 int fpregs_active(struct task_struct *target, const struct user_regset *regset)
 {

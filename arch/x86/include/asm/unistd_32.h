@@ -342,10 +342,20 @@
 #define __NR_pwritev		334
 #define __NR_rt_tgsigqueueinfo	335
 #define __NR_perf_event_open	336
+#define __NR_fairsched_mknod	500     /* FairScheduler syscalls */
+#define __NR_fairsched_rmnod	501
+#define __NR_fairsched_chwt	502
+#define __NR_fairsched_mvpr	503
+#define __NR_fairsched_rate	504
+#define __NR_fairsched_vcpus	505
+#define __NR_getluid		510
+#define __NR_setluid		511
+#define __NR_setublimit		512
+#define __NR_ubstat		513
 
 #ifdef __KERNEL__
 
-#define NR_syscalls 337
+#define NR_syscalls 514
 
 #define __ARCH_WANT_IPC_PARSE_VERSION
 #define __ARCH_WANT_OLD_READDIR

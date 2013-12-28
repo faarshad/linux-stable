@@ -12,6 +12,7 @@
 #include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/sysctl.h>
+#include <linux/module.h>
 #include <asm/mman.h>
 #include <asm/tlb.h>
 #include <asm/tlbflush.h>
@@ -230,6 +231,7 @@ int pud_huge(pud_t pud)
 {
 	return !!(pud_val(pud) & _PAGE_PSE);
 }
+EXPORT_SYMBOL(pmd_huge);
 
 struct page *
 follow_huge_pmd(struct mm_struct *mm, unsigned long address,

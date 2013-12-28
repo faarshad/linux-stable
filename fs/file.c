@@ -9,6 +9,7 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/time.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -20,6 +21,8 @@
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
 #include <linux/workqueue.h>
+
+#include <bc/kmem.h>
 
 struct fdtable_defer {
 	spinlock_t lock;
@@ -42,9 +45,9 @@ static DEFINE_PER_CPU(struct fdtable_defer, fdtable_defer_list);
 static inline void * alloc_fdmem(unsigned int size)
 {
 	if (size <= PAGE_SIZE)
-		return kmalloc(size, GFP_KERNEL);
+		return kmalloc(size, GFP_KERNEL_UBC);
 	else
-		return vmalloc(size);
+		return ub_vmalloc(size);
 }
 
 static inline void free_fdarr(struct fdtable *fdt)
@@ -163,7 +166,7 @@ static struct fdtable * alloc_fdtable(unsigned int nr)
 	if (unlikely(nr > sysctl_nr_open))
 		nr = ((sysctl_nr_open - 1) | (BITS_PER_LONG - 1)) + 1;
 
-	fdt = kmalloc(sizeof(struct fdtable), GFP_KERNEL);
+	fdt = kmalloc(sizeof(struct fdtable), GFP_KERNEL_UBC);
 	if (!fdt)
 		goto out;
 	fdt->max_fds = nr;
@@ -198,7 +201,7 @@ out:
  * Return <0 error code on error; 1 on successful completion.
  * The files->file_lock should be held on entry, and will be held on exit.
  */
-static int expand_fdtable(struct files_struct *files, int nr)
+int expand_fdtable(struct files_struct *files, int nr)
 	__releases(files->file_lock)
 	__acquires(files->file_lock)
 {
@@ -238,6 +241,7 @@ static int expand_fdtable(struct files_struct *files, int nr)
 	}
 	return 1;
 }
+EXPORT_SYMBOL_GPL(expand_fdtable);
 
 /*
  * Expand files.

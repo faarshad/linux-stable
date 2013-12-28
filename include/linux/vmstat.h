@@ -105,6 +105,7 @@ static inline void vm_events_fold_cpu(int cpu)
 }
 #endif
 
+extern unsigned long vm_events(enum vm_event_item i);
 #else
 
 /* Disable counters */
@@ -127,6 +128,7 @@ static inline void vm_events_fold_cpu(int cpu)
 {
 }
 
+static inline unsigned long vm_events(enum vm_event_item i) { return 0; }
 #endif /* CONFIG_VM_EVENT_COUNTERS */
 
 #define __count_zone_vm_events(item, zone, delta) \

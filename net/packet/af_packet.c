@@ -80,6 +80,8 @@
 #include <linux/init.h>
 #include <linux/mutex.h>
 
+#include <bc/net.h>
+
 #ifdef CONFIG_INET
 #include <net/inet_common.h>
 #endif
@@ -554,6 +556,8 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 	if (dev_net(dev) != sock_net(sk))
 		goto drop;
 
+	skb_orphan(skb);
+
 	skb->dev = dev;
 
 	if (dev->header_ops) {
@@ -617,6 +621,9 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 	if (pskb_trim(skb, snaplen))
 		goto drop_n_acct;
 
+	if (ub_sockrcvbuf_charge(sk, skb))
+		goto drop_n_acct;
+
 	skb_set_owner_r(skb, sk);
 	skb->dev = NULL;
 	skb_dst_drop(skb);
@@ -676,6 +683,8 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
 	if (dev_net(dev) != sock_net(sk))
 		goto drop;
 
+	skb_orphan(skb);
+
 	if (dev->header_ops) {
 		if (sk->sk_type != SOCK_DGRAM)
 			skb_push(skb, skb->data - skb_mac_header(skb));
@@ -723,6 +732,12 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
 		snaplen = po->rx_ring.frame_size - macoff;
 		if ((int)snaplen < 0)
 			snaplen = 0;
+	}
+
+	if (copy_skb &&
+	    ub_sockrcvbuf_charge(sk, copy_skb)) {
+		spin_lock(&sk->sk_receive_queue.lock);
+		goto ring_is_full;
 	}
 
 	spin_lock(&sk->sk_receive_queue.lock);
@@ -1028,8 +1043,20 @@ static int tpacket_snd(struct packet_sock *po, struct msghdr *msg)
 
 		status = TP_STATUS_SEND_REQUEST;
 		err = dev_queue_xmit(skb);
-		if (unlikely(err > 0 && (err = net_xmit_errno(err)) != 0))
-			goto out_xmit;
+		if (unlikely(err > 0)) {
+			err = net_xmit_errno(err);
+			if (err && __packet_get_status(po, ph) ==
+				   TP_STATUS_AVAILABLE) {
+				/* skb was destructed already */
+				skb = NULL;
+				goto out_status;
+			}
+			/*
+			 * skb was dropped but not destructed yet;
+			 * let's treat it like congestion or err < 0
+			 */
+			err = 0;
+		}
 		packet_increment_head(&po->tx_ring);
 		len_sum += tp_len;
 	} while (likely((ph != NULL) || ((!(msg->msg_flags & MSG_DONTWAIT))
@@ -1039,9 +1066,6 @@ static int tpacket_snd(struct packet_sock *po, struct msghdr *msg)
 	err = len_sum;
 	goto out_put;
 
-out_xmit:
-	skb->destructor = sock_wfree;
-	atomic_dec(&po->tx_ring.pending);
 out_status:
 	__packet_set_status(po, ph, status);
 	kfree_skb(skb);
@@ -1360,6 +1384,8 @@ static int packet_create(struct net *net, struct socket *sock, int protocol)
 	sk = sk_alloc(net, PF_PACKET, GFP_KERNEL, &packet_proto);
 	if (sk == NULL)
 		goto out;
+	if (ub_other_sock_charge(sk))
+		goto out_free;
 
 	sock->ops = &packet_ops;
 	if (sock->type == SOCK_PACKET)
@@ -1399,6 +1425,9 @@ static int packet_create(struct net *net, struct socket *sock, int protocol)
 	sock_prot_inuse_add(net, &packet_proto, 1);
 	write_unlock_bh(&net->packet.sklist_lock);
 	return 0;
+
+out_free:
+	sk_free(sk);
 out:
 	return err;
 }

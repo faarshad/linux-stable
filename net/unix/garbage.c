@@ -81,6 +81,7 @@
 #include <linux/proc_fs.h>
 #include <linux/mutex.h>
 #include <linux/wait.h>
+#include <linux/module.h>
 
 #include <net/sock.h>
 #include <net/af_unix.h>
@@ -153,6 +154,7 @@ void unix_notinflight(struct file *fp)
 		spin_unlock(&unix_gc_lock);
 	}
 }
+EXPORT_SYMBOL_GPL(unix_notinflight);
 
 static inline struct sk_buff *sock_queue_head(struct sock *sk)
 {

@@ -13,6 +13,9 @@
 
 extern void cpu_idle(void);
 
+struct pt_regs;
+typedef void (*smp_nmi_function)(struct pt_regs *regs, void *info);
+
 struct call_single_data {
 	struct list_head list;
 	void (*func) (void *info);
@@ -65,6 +68,8 @@ extern int __cpu_up(unsigned int cpunum);
  * Final polishing of CPUs
  */
 extern void smp_cpus_done(unsigned int max_cpus);
+
+extern int smp_nmi_call_function(smp_nmi_function func, void *info, int wait);
 
 /*
  * Call a function on all other processors
@@ -140,6 +145,12 @@ static inline void smp_send_reschedule(int cpu) { }
 static inline void init_call_single_data(void)
 {
 }
+static inline int smp_nmi_call_function(smp_nmi_function func,
+					 void *info, int wait)
+{
+	return 0;
+}
+
 #endif /* !SMP */
 
 /*

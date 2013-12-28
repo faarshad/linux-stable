@@ -31,6 +31,8 @@
  * POSIX clocks & timers
  */
 #include <linux/mm.h>
+#include <linux/module.h>
+#include <linux/smp_lock.h>
 #include <linux/interrupt.h>
 #include <linux/slab.h>
 #include <linux/time.h>
@@ -46,6 +48,9 @@
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <linux/module.h>
+#include <linux/pid_namespace.h>
+
+#include <bc/beancounter.h>
 
 /*
  * Management arrays for POSIX timers.	 Timers are kept in slab memory
@@ -303,8 +308,8 @@ static __init int init_posix_timers(void)
 	register_posix_clock(CLOCK_MONOTONIC_COARSE, &clock_monotonic_coarse);
 
 	posix_timers_cache = kmem_cache_create("posix_timers_cache",
-					sizeof (struct k_itimer), 0, SLAB_PANIC,
-					NULL);
+					sizeof (struct k_itimer), 0,
+					SLAB_PANIC|SLAB_UBC, NULL);
 	idr_init(&posix_timers_id);
 	return 0;
 }
@@ -363,6 +368,12 @@ int posix_timer_event(struct k_itimer *timr, int si_private)
 {
 	struct task_struct *task;
 	int shared, ret = -1;
+	struct ve_struct *ve;
+	struct user_beancounter *ub;
+
+	ve = set_exec_env(timr->it_process->ve_task_info.owner_env);
+	ub = set_exec_ub(timr->it_process->task_bc.task_ub);
+
 	/*
 	 * FIXME: if ->sigq is queued we can race with
 	 * dequeue_signal()->do_schedule_next_timer().
@@ -384,6 +395,8 @@ int posix_timer_event(struct k_itimer *timr, int si_private)
 	}
 	rcu_read_unlock();
 	/* If we failed to send the signal the timer stops. */
+	(void)set_exec_ub(ub);
+	(void)set_exec_env(ve);
 	return ret > 0;
 }
 EXPORT_SYMBOL_GPL(posix_timer_event);

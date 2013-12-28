@@ -1136,7 +1136,8 @@ int arp_ioctl(struct net *net, unsigned int cmd, void __user *arg)
 	switch (cmd) {
 		case SIOCDARP:
 		case SIOCSARP:
-			if (!capable(CAP_NET_ADMIN))
+			if (!capable(CAP_NET_ADMIN) &&
+					!capable(CAP_VE_NET_ADMIN))
 				return -EPERM;
 		case SIOCGARP:
 			err = copy_from_user(&r, arg, sizeof(struct arpreq));

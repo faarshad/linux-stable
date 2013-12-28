@@ -77,6 +77,7 @@
 #include <linux/file.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/vzcalluser.h>
 
 #include <linux/nsproxy.h>
 #include <net/net_namespace.h>
@@ -546,6 +547,9 @@ static struct proto pppoe_sk_proto __read_mostly = {
 static int pppoe_create(struct net *net, struct socket *sock)
 {
 	struct sock *sk;
+
+	if (!(get_exec_env()->features & VE_FEATURE_PPP))
+		return -EACCES;
 
 	sk = sk_alloc(net, PF_PPPOX, GFP_KERNEL, &pppoe_sk_proto);
 	if (!sk)

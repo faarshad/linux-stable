@@ -25,6 +25,7 @@ static struct file_system_type autofs_fs_type = {
 	.name		= "autofs",
 	.get_sb		= autofs_get_sb,
 	.kill_sb	= autofs4_kill_sb,
+	.fs_flags	= FS_VIRTUALIZED,
 };
 
 static int __init init_autofs4_fs(void)

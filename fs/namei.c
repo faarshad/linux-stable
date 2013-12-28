@@ -143,6 +143,7 @@ char * getname(const char __user * filename)
 {
 	char *tmp, *result;
 
+	/*ub_dentry_checkup();*/
 	result = ERR_PTR(-ENOMEM);
 	tmp = __getname();
 	if (tmp)  {
@@ -234,6 +235,7 @@ int generic_permission(struct inode *inode, int mask,
 	/*
 	 * Searching includes executable on directories, else just read.
 	 */
+	mask &= MAY_READ | MAY_WRITE | MAY_EXEC;
 	if (mask == MAY_READ || (S_ISDIR(inode->i_mode) && !(mask & MAY_WRITE)))
 		if (capable(CAP_DAC_READ_SEARCH))
 			return 0;
@@ -427,6 +429,21 @@ static struct dentry * cached_lookup(struct dentry * parent, struct qstr * name,
 	if (!dentry)
 		dentry = d_lookup(parent, name);
 
+	/*
+	 * The revalidation rules are simple:
+	 * d_revalidate operation is called when we're about to use a cached
+	 * dentry rather than call d_lookup.
+	 * d_revalidate method may unhash the dentry itself or return FALSE, in
+	 * which case if the dentry can be released d_lookup will be called.
+	 *
+	 * Additionally, by request of NFS people
+	 * (http://linux.bkbits.net:8080/linux-2.4/cset@1.181?nav=index.html|src/|src/fs|related/fs/namei.c)
+	 * d_revalidate is called when `/', `.' or `..' are looked up.
+	 * Since re-lookup is impossible on them, we introduce a hack and
+	 * return an error in this case.
+	 *
+	 *     2003/02/19  SAW
+	 */
 	if (dentry && dentry->d_op && dentry->d_op->d_revalidate)
 		dentry = do_revalidate(dentry, nd);
 
@@ -478,6 +495,7 @@ static struct dentry * real_lookup(struct dentry * parent, struct qstr * name, s
 	struct dentry * result;
 	struct inode *dir = parent->d_inode;
 
+repeat:
 	mutex_lock(&dir->i_mutex);
 	/*
 	 * First re-do the cached lookup just in case it was created
@@ -524,7 +542,7 @@ out_unlock:
 	if (result->d_op && result->d_op->d_revalidate) {
 		result = do_revalidate(result, nd);
 		if (!result)
-			result = ERR_PTR(-ENOENT);
+			goto repeat;
 	}
 	return result;
 }
@@ -764,6 +782,12 @@ static __always_inline void follow_dotdot(struct nameidata *nd)
 		    nd->path.mnt == nd->root.mnt) {
 			break;
 		}
+#ifdef CONFIG_VE
+		if (nd->path.dentry == get_exec_env()->root_path.dentry &&
+		    nd->path.mnt == get_exec_env()->root_path.mnt) {
+			break;
+		}
+#endif
 		spin_lock(&dcache_lock);
 		if (nd->path.dentry != nd->path.mnt->mnt_root) {
 			nd->path.dentry = dget(nd->path.dentry->d_parent);
@@ -804,6 +828,10 @@ static int do_lookup(struct nameidata *nd, struct qstr *name,
 	if (dentry->d_op && dentry->d_op->d_revalidate)
 		goto need_revalidate;
 done:
+	if ((nd->flags & LOOKUP_STRICT) && d_mountpoint(dentry)) {
+		dput(dentry);
+		return -ENOENT;
+	}
 	path->mnt = mnt;
 	path->dentry = dentry;
 	__follow_mount(path);
@@ -828,6 +856,18 @@ fail:
 }
 
 /*
+ * This is a temporary kludge to deal with "automount" symlinks; proper
+ * solution is to trigger them on follow_mount(), so that do_lookup()
+ * would DTRT.  To be killed before 2.6.34-final.
+ */
+static inline int follow_on_final(struct inode *inode, unsigned lookup_flags)
+{
+	return inode && unlikely(inode->i_op->follow_link) &&
+		!(lookup_flags & LOOKUP_STRICT) &&
+		((lookup_flags & LOOKUP_FOLLOW) || S_ISDIR(inode->i_mode));
+}
+
+/*
  * Name resolution.
  * This is the basic name resolution function, turning a pathname into
  * the final dentry. We expect 'base' to be positive and a directory.
@@ -841,6 +881,7 @@ static int __link_path_walk(const char *name, struct nameidata *nd)
 	struct inode *inode;
 	int err;
 	unsigned int lookup_flags = nd->flags;
+	int real_components = 0;
 	
 	while (*name=='/')
 		name++;
@@ -909,6 +950,7 @@ static int __link_path_walk(const char *name, struct nameidata *nd)
 				break;
 		}
 		/* This does the actual lookups.. */
+		real_components++;
 		err = do_lookup(nd, &this, &next);
 		if (err)
 			break;
@@ -919,6 +961,9 @@ static int __link_path_walk(const char *name, struct nameidata *nd)
 			goto out_dput;
 
 		if (inode->i_op->follow_link) {
+			err = -ENOENT;
+			if (lookup_flags & LOOKUP_STRICT)
+				goto out_dput;
 			err = do_follow_link(&next, nd);
 			if (err)
 				goto return_err;
@@ -963,8 +1008,7 @@ last_component:
 		if (err)
 			break;
 		inode = next.dentry->d_inode;
-		if ((lookup_flags & LOOKUP_FOLLOW)
-		    && inode && inode->i_op->follow_link) {
+		if (follow_on_final(inode, lookup_flags)) {
 			err = do_follow_link(&next, nd);
 			if (err)
 				goto return_err;
@@ -985,27 +1029,41 @@ lookup_parent:
 		nd->last_type = LAST_NORM;
 		if (this.name[0] != '.')
 			goto return_base;
-		if (this.len == 1)
+		if (this.len == 1) {
 			nd->last_type = LAST_DOT;
-		else if (this.len == 2 && this.name[1] == '.')
+			goto return_reval;
+		} else if (this.len == 2 && this.name[1] == '.') {
 			nd->last_type = LAST_DOTDOT;
-		else
-			goto return_base;
+			goto return_reval;
+		}
+return_base:
+		if (!(nd->flags & LOOKUP_NOAREACHECK)) {
+			err = check_area_access_ve(&nd->path);
+			if (err)
+				break;
+		}
+		return 0;
 return_reval:
 		/*
 		 * We bypassed the ordinary revalidation routines.
 		 * We may need to check the cached dentry for staleness.
 		 */
-		if (nd->path.dentry && nd->path.dentry->d_sb &&
+		if (!real_components && nd->path.dentry && nd->path.dentry->d_sb &&
 		    (nd->path.dentry->d_sb->s_type->fs_flags & FS_REVAL_DOT)) {
 			err = -ESTALE;
 			/* Note: we do not d_invalidate() */
 			if (!nd->path.dentry->d_op->d_revalidate(
 					nd->path.dentry, nd))
+				/*
+				 * This lookup is for `/' or `.' or `..'.
+				 * The filesystem unhashed the dentry itself
+				 * inside d_revalidate (otherwise, d_invalidate
+				 * wouldn't succeed).  As a special courtesy to
+				 * NFS we return an error.   2003/02/19  SAW
+				 */
 				break;
 		}
-return_base:
-		return 0;
+		goto return_base;
 out_dput:
 		path_put_conditional(&next, nd);
 		break;
@@ -2084,6 +2142,7 @@ SYSCALL_DEFINE3(mknod, const char __user *, filename, int, mode, unsigned, dev)
 {
 	return sys_mknodat(AT_FDCWD, filename, mode, dev);
 }
+EXPORT_SYMBOL_GPL(sys_mknod);
 
 int vfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 {
@@ -2148,6 +2207,7 @@ SYSCALL_DEFINE2(mkdir, const char __user *, pathname, int, mode)
 {
 	return sys_mkdirat(AT_FDCWD, pathname, mode);
 }
+EXPORT_SYMBOL_GPL(sys_mkdir);
 
 /*
  * We try to drop the dentry early: we should have
@@ -2175,6 +2235,7 @@ void dentry_unhash(struct dentry *dentry)
 	spin_unlock(&dentry->d_lock);
 	spin_unlock(&dcache_lock);
 }
+EXPORT_SYMBOL(sys_symlink);
 
 int vfs_rmdir(struct inode *dir, struct dentry *dentry)
 {
@@ -2262,6 +2323,7 @@ SYSCALL_DEFINE1(rmdir, const char __user *, pathname)
 {
 	return do_rmdir(AT_FDCWD, pathname);
 }
+EXPORT_SYMBOL_GPL(sys_rmdir);
 
 int vfs_unlink(struct inode *dir, struct dentry *dentry)
 {
@@ -2369,6 +2431,7 @@ SYSCALL_DEFINE1(unlink, const char __user *, pathname)
 {
 	return do_unlinkat(AT_FDCWD, pathname);
 }
+EXPORT_SYMBOL_GPL(sys_unlink);
 
 int vfs_symlink(struct inode *dir, struct dentry *dentry, const char *oldname)
 {
@@ -2539,6 +2602,7 @@ SYSCALL_DEFINE2(link, const char __user *, oldname, const char __user *, newname
 {
 	return sys_linkat(AT_FDCWD, oldname, AT_FDCWD, newname, 0);
 }
+EXPORT_SYMBOL(sys_rename);
 
 /*
  * The worst of all namespace operations - renaming directory. "Perverted"
@@ -2649,6 +2713,9 @@ int vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	int error;
 	int is_dir = S_ISDIR(old_dentry->d_inode->i_mode);
 	const char *old_name;
+
+	if (vfs_dq_rename(old_dentry->d_inode, old_dir, new_dir))
+		return -EXDEV;
 
 	if (old_dentry->d_inode == new_dentry->d_inode)
  		return 0;

@@ -321,6 +321,9 @@ ipt_do_table(struct sk_buff *skb,
 	struct xt_match_param mtpar;
 	struct xt_target_param tgpar;
 
+	if (ve_xt_table_forbidden(table))
+		return NF_ACCEPT;
+
 	/* Initialization */
 	ip = ip_hdr(skb);
 	indev = in ? in->name : nulldevname;
@@ -466,8 +469,8 @@ mark_source_chains(struct xt_table_info *newinfo,
 			int visited = e->comefrom & (1 << hook);
 
 			if (e->comefrom & (1 << NF_INET_NUMHOOKS)) {
-				printk("iptables: loop hook %u pos %u %08X.\n",
-				       hook, pos, e->comefrom);
+				ve_printk(VE_LOG, "iptables: loop hook %u pos "
+					"%u %08X.\n", hook, pos, e->comefrom);
 				return 0;
 			}
 			e->comefrom |= ((1 << hook) | (1 << NF_INET_NUMHOOKS));
@@ -950,7 +953,7 @@ static struct xt_counters * alloc_counters(struct xt_table *table)
 	   (other than comefrom, which userspace doesn't care
 	   about). */
 	countersize = sizeof(struct xt_counters) * private->number;
-	counters = vmalloc_node(countersize, numa_node_id());
+	counters = ub_vmalloc_node(countersize, numa_node_id());
 
 	if (counters == NULL)
 		return ERR_PTR(-ENOMEM);
@@ -1132,10 +1135,10 @@ static int get_info(struct net *net, void __user *user, int *len, int compat)
 	if (t && !IS_ERR(t)) {
 		struct ipt_getinfo info;
 		const struct xt_table_info *private = t->private;
-
 #ifdef CONFIG_COMPAT
+		struct xt_table_info tmp;
+
 		if (compat) {
-			struct xt_table_info tmp;
 			ret = compat_table_info(private, &tmp);
 			xt_compat_flush_offsets(AF_INET);
 			private = &tmp;
@@ -1217,7 +1220,7 @@ __do_replace(struct net *net, const char *name, unsigned int valid_hooks,
 	void *loc_cpu_old_entry;
 
 	ret = 0;
-	counters = vmalloc(num_counters * sizeof(struct xt_counters));
+	counters = ub_vmalloc_best(num_counters * sizeof(struct xt_counters));
 	if (!counters) {
 		ret = -ENOMEM;
 		goto out;
@@ -1381,7 +1384,7 @@ do_add_counters(struct net *net, void __user *user, unsigned int len, int compat
 	if (len != size + num_counters * sizeof(struct xt_counters))
 		return -EINVAL;
 
-	paddc = vmalloc_node(len - size, numa_node_id());
+	paddc = ub_vmalloc_node(len - size, numa_node_id());
 	if (!paddc)
 		return -ENOMEM;
 
@@ -1855,13 +1858,15 @@ compat_do_replace(struct net *net, void __user *user, unsigned int len)
 	return ret;
 }
 
+static int do_ipt_set_ctl(struct sock *, int, void __user *, unsigned int);
+
 static int
 compat_do_ipt_set_ctl(struct sock *sk,	int cmd, void __user *user,
 		      unsigned int len)
 {
 	int ret;
 
-	if (!capable(CAP_NET_ADMIN))
+	if (!capable(CAP_NET_ADMIN) && !capable(CAP_VE_NET_ADMIN))
 		return -EPERM;
 
 	switch (cmd) {
@@ -1874,8 +1879,7 @@ compat_do_ipt_set_ctl(struct sock *sk,	int cmd, void __user *user,
 		break;
 
 	default:
-		duprintf("do_ipt_set_ctl:  unknown request %i\n", cmd);
-		ret = -EINVAL;
+		ret = do_ipt_set_ctl(sk, cmd, user, len);
 	}
 
 	return ret;
@@ -1972,7 +1976,7 @@ compat_do_ipt_get_ctl(struct sock *sk, int cmd, void __user *user, int *len)
 {
 	int ret;
 
-	if (!capable(CAP_NET_ADMIN))
+	if (!capable(CAP_NET_ADMIN) && !capable(CAP_VE_NET_ADMIN))
 		return -EPERM;
 
 	switch (cmd) {
@@ -1994,7 +1998,7 @@ do_ipt_set_ctl(struct sock *sk, int cmd, void __user *user, unsigned int len)
 {
 	int ret;
 
-	if (!capable(CAP_NET_ADMIN))
+	if (!capable(CAP_NET_ADMIN) && !capable(CAP_VE_NET_ADMIN))
 		return -EPERM;
 
 	switch (cmd) {
@@ -2019,7 +2023,7 @@ do_ipt_get_ctl(struct sock *sk, int cmd, void __user *user, int *len)
 {
 	int ret;
 
-	if (!capable(CAP_NET_ADMIN))
+	if (!capable(CAP_NET_ADMIN) && !capable(CAP_VE_NET_ADMIN))
 		return -EPERM;
 
 	switch (cmd) {
@@ -2072,7 +2076,7 @@ struct xt_table *ipt_register_table(struct net *net,
 	int ret;
 	struct xt_table_info *newinfo;
 	struct xt_table_info bootstrap
-		= { 0, 0, 0, { 0 }, { 0 }, { } };
+		= { 0, 0, 0, 0, { 0 }, { 0 }, { } };
 	void *loc_cpu_entry;
 	struct xt_table *new_table;
 
@@ -2218,11 +2222,22 @@ static struct xt_match icmp_matchstruct __read_mostly = {
 
 static int __net_init ip_tables_net_init(struct net *net)
 {
-	return xt_proto_init(net, NFPROTO_IPV4);
+	int res;
+
+	if (!net_ipt_module_permitted(net, VE_IP_IPTABLES))
+		return 0;
+
+	res = xt_proto_init(net, NFPROTO_IPV4);
+	if (!res)
+		net_ipt_module_set(net, VE_IP_IPTABLES);
+	return res;
 }
 
 static void __net_exit ip_tables_net_exit(struct net *net)
 {
+	if (!net_is_ipt_module_set(net, VE_IP_IPTABLES))
+		return;
+
 	xt_proto_fini(net, NFPROTO_IPV4);
 }
 

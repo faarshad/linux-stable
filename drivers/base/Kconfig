@@ -10,7 +10,7 @@ config UEVENT_HELPER_PATH
 
 config DEVTMPFS
 	bool "Create a kernel maintained /dev tmpfs (EXPERIMENTAL)"
-	depends on HOTPLUG && SHMEM && TMPFS
+	depends on HOTPLUG && SHMEM && TMPFS && !VE
 	help
 	  This creates a tmpfs filesystem, and mounts it at bootup
 	  and mounts it at /dev. The kernel driver core creates device

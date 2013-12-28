@@ -38,6 +38,8 @@ static const char *kobject_actions[] = {
 	[KOBJ_REMOVE] =		"remove",
 	[KOBJ_CHANGE] =		"change",
 	[KOBJ_MOVE] =		"move",
+	[KOBJ_START] =		"start",
+	[KOBJ_STOP] =		"stop",
 	[KOBJ_ONLINE] =		"online",
 	[KOBJ_OFFLINE] =	"offline",
 };

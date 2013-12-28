@@ -17,6 +17,26 @@
 #include <linux/kmemtrace.h>
 
 /*
+ * DEBUG	- 1 for kmem_cache_create() to honour; SLAB_RED_ZONE & SLAB_POISON.
+ *		  0 for faster, smaller code (especially in the critical paths).
+ *
+ * STATS	- 1 to collect stats for /proc/slabinfo.
+ *		  0 for faster, smaller code (especially in the critical paths).
+ *
+ * FORCED_DEBUG	- 1 enables SLAB_RED_ZONE and SLAB_POISON (if possible)
+ */
+
+#ifdef CONFIG_DEBUG_SLAB
+#define	SLAB_DEBUG		1
+#define	SLAB_STATS		1
+#define SLAB_FORCED_DEBUG	1
+#else
+#define	SLAB_DEBUG		0
+#define	SLAB_STATS		0
+#define SLAB_FORCED_DEBUG	0
+#endif
+
+/*
  * struct kmem_cache
  *
  * manages a cache.
@@ -64,6 +84,7 @@ struct kmem_cache {
 	unsigned long high_mark;
 	unsigned long grown;
 	unsigned long reaped;
+	unsigned long shrunk;
 	unsigned long errors;
 	unsigned long max_freeable;
 	unsigned long node_allocs;
@@ -83,6 +104,9 @@ struct kmem_cache {
 	int obj_offset;
 	int obj_size;
 #endif /* CONFIG_DEBUG_SLAB */
+#ifdef CONFIG_BEANCOUNTERS
+	int objuse;
+#endif
 
 	/*
 	 * We put nodelists[] at the end of kmem_cache, because we want to size
@@ -106,6 +130,7 @@ struct cache_sizes {
 #endif
 };
 extern struct cache_sizes malloc_sizes[];
+extern int malloc_cache_num;
 
 void *kmem_cache_alloc(struct kmem_cache *, gfp_t);
 void *__kmalloc(size_t size, gfp_t flags);
@@ -145,6 +170,8 @@ static __always_inline void *kmalloc(size_t size, gfp_t flags)
 #undef CACHE
 		return NULL;
 found:
+		if (flags & __GFP_UBC)
+			i += malloc_cache_num;
 #ifdef CONFIG_ZONE_DMA
 		if (flags & GFP_DMA)
 			cachep = malloc_sizes[i].cs_dmacachep;

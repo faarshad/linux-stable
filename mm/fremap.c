@@ -21,6 +21,8 @@
 #include <asm/cacheflush.h>
 #include <asm/tlbflush.h>
 
+#include <bc/vmpages.h>
+
 #include "internal.h"
 
 static void zap_pte(struct mm_struct *mm, struct vm_area_struct *vma,
@@ -38,6 +40,7 @@ static void zap_pte(struct mm_struct *mm, struct vm_area_struct *vma,
 			if (pte_dirty(pte))
 				set_page_dirty(page);
 			page_remove_rmap(page);
+			pb_remove_ref(page, mm);
 			page_cache_release(page);
 			update_hiwater_rss(mm);
 			dec_mm_counter(mm, file_rss);
@@ -64,8 +67,10 @@ static int install_file_pte(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (!pte)
 		goto out;
 
-	if (!pte_none(*pte))
+	if (!pte_none(*pte)) {
 		zap_pte(mm, vma, addr, pte);
+		ub_unused_privvm_inc(mm, vma);
+	}
 
 	set_pte_at(mm, addr, pte, pgoff_to_pte(pgoff));
 	/*
@@ -222,7 +227,7 @@ SYSCALL_DEFINE5(remap_file_pages, unsigned long, start, unsigned long, size,
 		 * drop PG_Mlocked flag for over-mapped range
 		 */
 		unsigned int saved_flags = vma->vm_flags;
-		munlock_vma_pages_range(vma, start, start + size);
+		__munlock_vma_pages_range(vma, start, start + size, 0);
 		vma->vm_flags = saved_flags;
 	}
 
@@ -258,3 +263,4 @@ out:
 
 	return err;
 }
+EXPORT_SYMBOL_GPL(sys_remap_file_pages);

@@ -133,6 +133,7 @@ extern int core_sys_select(int n, fd_set __user *inp, fd_set __user *outp,
 			   fd_set __user *exp, struct timespec *end_time);
 
 extern int poll_select_set_timeout(struct timespec *to, long sec, long nsec);
+long do_restart_poll(struct restart_block *restart_block);
 
 #endif /* KERNEL */
 

@@ -598,10 +598,13 @@ static void xprt_autoclose(struct work_struct *work)
 {
 	struct rpc_xprt *xprt =
 		container_of(work, struct rpc_xprt, task_cleanup);
+	struct ve_struct *ve;
 
+	ve = set_exec_env(xprt->owner_env);
 	xprt->ops->close(xprt);
 	clear_bit(XPRT_CLOSE_WAIT, &xprt->state);
 	xprt_release_write(xprt, NULL);
+	(void)set_exec_env(ve);
 }
 
 /**
@@ -668,7 +671,9 @@ static void
 xprt_init_autodisconnect(unsigned long data)
 {
 	struct rpc_xprt *xprt = (struct rpc_xprt *)data;
+	struct ve_struct *ve;
 
+	ve = set_exec_env(xprt->owner_env);
 	spin_lock(&xprt->transport_lock);
 	if (!list_empty(&xprt->recv) || xprt->shutdown)
 		goto out_abort;
@@ -677,9 +682,11 @@ xprt_init_autodisconnect(unsigned long data)
 	spin_unlock(&xprt->transport_lock);
 	set_bit(XPRT_CONNECTION_CLOSE, &xprt->state);
 	queue_work(rpciod_workqueue, &xprt->task_cleanup);
+	(void)set_exec_env(ve);
 	return;
 out_abort:
 	spin_unlock(&xprt->transport_lock);
+	(void)set_exec_env(ve);
 }
 
 /**
@@ -1095,6 +1102,7 @@ found:
 	xprt->last_used = jiffies;
 	xprt->cwnd = RPC_INITCWND;
 	xprt->bind_index = 0;
+	xprt->owner_env = get_ve(get_exec_env());
 
 	rpc_init_wait_queue(&xprt->binding, "xprt_binding");
 	rpc_init_wait_queue(&xprt->pending, "xprt_pending");

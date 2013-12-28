@@ -162,6 +162,7 @@ unsigned char kbd_sysrq_xlate[KEY_MAX + 1] =
 static int sysrq_down;
 static int sysrq_alt_use;
 #endif
+int sysrq_key_scancode = KEY_SYSRQ;
 static int sysrq_alt;
 
 /*
@@ -1067,6 +1068,9 @@ static int emulate_raw(struct vc_data *vc, unsigned int keycode,
 {
 	int code;
 
+	if (keycode == sysrq_key_scancode && sysrq_alt)
+		goto sysrq;
+
 	switch (keycode) {
 		case KEY_PAUSE:
 			put_queue(vc, 0xe1);
@@ -1085,6 +1089,7 @@ static int emulate_raw(struct vc_data *vc, unsigned int keycode,
 			break;
 
 		case KEY_SYSRQ:
+sysrq:
 			/*
 			 * Real AT keyboards (that's what we're trying
 			 * to emulate here emit 0xe0 0x2a 0xe0 0x37 when
@@ -1179,7 +1184,8 @@ static void kbd_keycode(unsigned int keycode, int down, int hw_raw)
 				printk(KERN_WARNING "keyboard.c: can't emulate rawmode for keycode %d\n", keycode);
 
 #ifdef CONFIG_MAGIC_SYSRQ	       /* Handle the SysRq Hack */
-	if (keycode == KEY_SYSRQ && (sysrq_down || (down == 1 && sysrq_alt))) {
+	if ((keycode == sysrq_key_scancode || keycode == KEY_SYSRQ) &&
+				(sysrq_down || (down == 1 && sysrq_alt))) {
 		if (!sysrq_down) {
 			sysrq_down = down;
 			sysrq_alt_use = sysrq_alt;

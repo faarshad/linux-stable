@@ -69,6 +69,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/nsproxy.h>
 #include <linux/bootmem.h>
 #include <linux/string.h>
 #include <linux/socket.h>
@@ -115,6 +116,7 @@
 
 #define RT_GC_TIMEOUT (300*HZ)
 
+int ip_rt_src_check		= 1;
 static int ip_rt_max_size;
 static int ip_rt_gc_timeout __read_mostly	= RT_GC_TIMEOUT;
 static int ip_rt_gc_interval __read_mostly	= 60 * HZ;
@@ -1420,6 +1422,9 @@ void ip_rt_redirect(__be32 old_gw, __be32 daddr, __be32 new_gw,
 				rt->u.dst.xfrm		= NULL;
 #endif
 				rt->rt_genid		= rt_genid(net);
+#ifdef CONFIG_VE
+				rt->fl.owner_env = get_exec_env();
+#endif
 				rt->rt_flags		|= RTCF_REDIRECTED;
 
 				/* Gateway is different ... */
@@ -1876,9 +1881,12 @@ static int ip_route_input_mc(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 #ifdef CONFIG_NET_CLS_ROUTE
 	rth->u.dst.tclassid = itag;
 #endif
+#ifdef CONFIG_VE
+	rth->fl.owner_env = get_exec_env();
+#endif
 	rth->rt_iif	=
 	rth->fl.iif	= dev->ifindex;
-	rth->u.dst.dev	= init_net.loopback_dev;
+	rth->u.dst.dev	= get_exec_env()->ve_netns->loopback_dev;
 	dev_hold(rth->u.dst.dev);
 	rth->idev	= in_dev_get(rth->u.dst.dev);
 	rth->fl.oif	= 0;
@@ -2014,6 +2022,9 @@ static int __mkroute_input(struct sk_buff *skb,
 	rth->fl.fl4_src	= saddr;
 	rth->rt_src	= saddr;
 	rth->rt_gateway	= daddr;
+#ifdef CONFIG_VE
+	rth->fl.owner_env = get_exec_env();
+#endif
 	rth->rt_iif 	=
 		rth->fl.iif	= in_dev->dev->ifindex;
 	rth->u.dst.dev	= (out_dev)->dev;
@@ -2208,6 +2219,9 @@ local_input:
 	rth->idev	= in_dev_get(rth->u.dst.dev);
 	rth->rt_gateway	= daddr;
 	rth->rt_spec_dst= spec_dst;
+#ifdef CONFIG_VE
+	rth->fl.owner_env = get_exec_env();
+#endif
 	rth->u.dst.input= ip_local_deliver;
 	rth->rt_flags 	= flags|RTCF_LOCAL;
 	if (res.type == RTN_UNREACHABLE) {
@@ -2401,6 +2415,9 @@ static int __mkroute_output(struct rtable **result,
 	rth->fl.mark    = oldflp->mark;
 	rth->rt_dst	= fl->fl4_dst;
 	rth->rt_src	= fl->fl4_src;
+#ifdef CONFIG_VE
+	rth->fl.owner_env = get_exec_env();
+#endif
 	rth->rt_iif	= oldflp->oif ? : dev_out->ifindex;
 	/* get references to the devices that are to be hold by the routing
 	   cache entry */
@@ -2541,7 +2558,7 @@ static int ip_route_output_slow(struct net *net, struct rtable **rp,
 			goto make_route;
 		}
 
-		if (!(oldflp->flags & FLOWI_FLAG_ANYSRC)) {
+		if (!(oldflp->flags & FLOWI_FLAG_ANYSRC) && ip_rt_src_check) {
 			/* It is equivalent to inet_addr_type(saddr) == RTN_LOCAL */
 			dev_out = ip_dev_find(net, oldflp->fl4_src);
 			if (dev_out == NULL)

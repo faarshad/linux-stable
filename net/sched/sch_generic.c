@@ -179,17 +179,23 @@ static inline int qdisc_restart(struct Qdisc *q)
 	struct net_device *dev;
 	spinlock_t *root_lock;
 	struct sk_buff *skb;
+	int ret;
+	struct ve_struct *old_ve;
 
 	/* Dequeue packet */
 	skb = dequeue_skb(q);
 	if (unlikely(!skb))
 		return 0;
 
+	old_ve = set_exec_env(skb->owner_env);
 	root_lock = qdisc_lock(q);
 	dev = qdisc_dev(q);
 	txq = netdev_get_tx_queue(dev, skb_get_queue_mapping(skb));
 
-	return sch_direct_xmit(skb, q, dev, txq, root_lock);
+	ret = sch_direct_xmit(skb, q, dev, txq, root_lock);
+	(void)set_exec_env(old_ve);
+
+	return ret;
 }
 
 void __qdisc_run(struct Qdisc *q)

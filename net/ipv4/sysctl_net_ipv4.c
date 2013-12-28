@@ -26,6 +26,9 @@ static int tcp_retr1_max = 255;
 static int ip_local_port_range_min[] = { 1, 1 };
 static int ip_local_port_range_max[] = { 65535, 65535 };
 
+int sysctl_tcp_use_sg = 1;
+EXPORT_SYMBOL(sysctl_tcp_use_sg);
+
 /* Update system visible IP port range */
 static void set_local_port_range(int range[2])
 {
@@ -794,6 +797,27 @@ static struct ctl_table ipv4_net_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname       = "tcp_max_tw_kmem_fraction",
+		.data           = &sysctl_tcp_max_tw_kmem_fraction,
+		.maxlen         = sizeof(int),
+		.mode           = 0644,
+		.proc_handler   = proc_dointvec,
+	},
+	{
+		.procname       = "tcp_max_tw_buckets_ub",
+		.data           = &sysctl_tcp_max_tw_buckets_ub,
+		.maxlen         = sizeof(int),
+		.mode           = 0644,
+		.proc_handler   = proc_dointvec,
+	},
+	{
+		.procname	= "tcp_use_sg",
+		.data		= &sysctl_tcp_use_sg,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
 	},
 	{
 		.ctl_name	= CTL_UNNUMBERED,

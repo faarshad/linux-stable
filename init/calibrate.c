@@ -9,6 +9,7 @@
 #include <linux/init.h>
 #include <linux/timex.h>
 #include <linux/smp.h>
+#include <linux/module.h>
 
 unsigned long lpj_fine;
 unsigned long preset_lpj;
@@ -108,6 +109,60 @@ static unsigned long __cpuinit calibrate_delay_direct(void)
 static unsigned long __cpuinit calibrate_delay_direct(void) {return 0;}
 #endif
 
+unsigned long cycles_per_jiffy, cycles_per_clock;
+
+static __devinit void calibrate_cycles(void)
+{
+	unsigned long ticks;
+	cycles_t time;
+
+	ticks = jiffies;
+	while (ticks == jiffies)
+		/* nothing */;
+	time = get_cycles();
+	ticks = jiffies;
+	while (ticks == jiffies)
+		/* nothing */;
+
+	time = get_cycles() - time;
+	cycles_per_jiffy = time;
+	if ((time >> 32) != 0) {
+		printk("CPU too fast! timings are incorrect\n");
+		cycles_per_jiffy = -1;
+	}
+}
+
+EXPORT_SYMBOL(cycles_per_jiffy);
+EXPORT_SYMBOL(cycles_per_clock);
+
+static __devinit void calc_cycles_per_jiffy(void)
+{
+#if 0
+	extern unsigned long fast_gettimeoffset_quotient;
+	unsigned long low, high;
+
+	if (fast_gettimeoffset_quotient != 0) {
+		__asm__("divl %2"
+				:"=a" (low), "=d" (high)
+				:"r" (fast_gettimeoffset_quotient),
+				"0" (0), "1" (1000000/HZ));
+
+		cycles_per_jiffy = low;
+	}
+#endif
+	if (cycles_per_jiffy == 0)
+		calibrate_cycles();
+
+	if (cycles_per_jiffy == 0) {
+		printk(KERN_WARNING "Cycles are stuck! "
+				"Some statistics will not be available.");
+		/* to prevent division by zero in cycles_to_(clocks|jiffies) */
+		cycles_per_jiffy = 1;
+		cycles_per_clock = 1;
+	} else
+		cycles_per_clock = cycles_per_jiffy * (HZ / CLOCKS_PER_SEC);
+}
+
 /*
  * This is the number of bits of precision for the loops_per_jiffy.  Each
  * bit takes on average 1.5/HZ seconds.  This (like the original) is a little
@@ -123,23 +178,26 @@ void __cpuinit calibrate_delay(void)
 {
 	unsigned long ticks, loopbit;
 	int lps_precision = LPS_PREC;
+	static bool printed;
 
 	if (preset_lpj) {
 		loops_per_jiffy = preset_lpj;
-		printk(KERN_INFO
-			"Calibrating delay loop (skipped) preset value.. ");
-	} else if ((smp_processor_id() == 0) && lpj_fine) {
+		if (!printed)
+			pr_info("Calibrating delay loop (skipped) "
+				"preset value.. ");
+	} else if ((!printed) && lpj_fine) {
 		loops_per_jiffy = lpj_fine;
-		printk(KERN_INFO
-			"Calibrating delay loop (skipped), "
+		pr_info("Calibrating delay loop (skipped), "
 			"value calculated using timer frequency.. ");
 	} else if ((loops_per_jiffy = calibrate_delay_direct()) != 0) {
-		printk(KERN_INFO
-			"Calibrating delay using timer specific routine.. ");
+		if (!printed)
+			pr_info("Calibrating delay using timer "
+				"specific routine.. ");
 	} else {
 		loops_per_jiffy = (1<<12);
 
-		printk(KERN_INFO "Calibrating delay loop... ");
+		if (!printed)
+			pr_info("Calibrating delay loop... ");
 		while ((loops_per_jiffy <<= 1) != 0) {
 			/* wait for "start of" clock tick */
 			ticks = jiffies;
@@ -170,7 +228,11 @@ void __cpuinit calibrate_delay(void)
 				loops_per_jiffy &= ~loopbit;
 		}
 	}
-	printk(KERN_CONT "%lu.%02lu BogoMIPS (lpj=%lu)\n",
+	if (!printed)
+		pr_cont("%lu.%02lu BogoMIPS (lpj=%lu)\n",
 			loops_per_jiffy/(500000/HZ),
 			(loops_per_jiffy/(5000/HZ)) % 100, loops_per_jiffy);
+
+	calc_cycles_per_jiffy();
+	printed = true;
 }

@@ -70,6 +70,7 @@ struct vfsmount {
 #else
 	int mnt_writers;
 #endif
+	unsigned owner;
 };
 
 static inline int *get_mnt_writers_ptr(struct vfsmount *mnt)

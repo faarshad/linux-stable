@@ -658,7 +658,7 @@ submit_page_section(struct dio *dio, struct page *page,
 		/*
 		 * Read accounting is performed in submit_bio()
 		 */
-		task_io_account_write(len);
+		task_io_account_write(page, len, 1);
 	}
 
 	/*

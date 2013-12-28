@@ -229,6 +229,9 @@ static int svc_sendto(struct svc_rqst *rqstp, struct xdr_buf *xdr)
 	unsigned long tailoff;
 	unsigned long headoff;
 	RPC_IFDEBUG(char buf[RPC_MAX_ADDRBUFLEN]);
+	struct ve_struct *old_env;
+
+	old_env = set_exec_env(sock->sk->owner_env);
 
 	if (rqstp->rq_prot == IPPROTO_UDP) {
 		struct msghdr msg = {
@@ -254,6 +257,8 @@ out:
 	dprintk("svc: socket %p sendto([%p %Zu... ], %d) = %d (addr %s)\n",
 		svsk, xdr->head[0].iov_base, xdr->head[0].iov_len,
 		xdr->len, len, svc_print_addr(rqstp, buf, sizeof(buf)));
+
+	(void)set_exec_env(old_env);
 
 	return len;
 }
@@ -1436,8 +1441,9 @@ static struct svc_xprt *svc_create_socket(struct svc_serv *serv,
 
 	error = sock_create_kern(family, type, protocol, &sock);
 	if (error < 0)
-		return ERR_PTR(error);
+		return ERR_PTR(-ENOMEM);
 
+	sk_change_net_get(sock->sk, get_exec_env()->ve_netns);
 	svc_reclassify_socket(sock);
 
 	/*
@@ -1488,6 +1494,8 @@ static void svc_sock_detach(struct svc_xprt *xprt)
 
 	dprintk("svc: svc_sock_detach(%p)\n", svsk);
 
+	/* XXX: serialization? */
+	sk->sk_user_data = NULL;
 	/* put back the old socket callbacks */
 	sk->sk_state_change = svsk->sk_ostate;
 	sk->sk_data_ready = svsk->sk_odata;

@@ -97,6 +97,7 @@
 #include <net/ip.h>
 #include <net/udp.h>
 #include <net/xfrm.h>
+#include <linux/vzcalluser.h>
 
 #include <asm/byteorder.h>
 #include <asm/atomic.h>
@@ -1587,6 +1588,9 @@ static int pppol2tp_create(struct net *net, struct socket *sock)
 {
 	int error = -ENOMEM;
 	struct sock *sk;
+
+	if (!(get_exec_env()->features & VE_FEATURE_PPP))
+		return -EACCES;
 
 	sk = sk_alloc(net, PF_PPPOX, GFP_KERNEL, &pppol2tp_sk_proto);
 	if (!sk)

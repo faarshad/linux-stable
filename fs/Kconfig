@@ -63,6 +63,15 @@ source "fs/autofs/Kconfig"
 source "fs/autofs4/Kconfig"
 source "fs/fuse/Kconfig"
 
+config SIM_FS
+	tristate "VPS filesystem"
+	depends on VZ_QUOTA
+	default m
+	help
+	  This file system is a part of Virtuozzo. It intoduces a fake
+	  superblock and blockdev to VE to hide real device and show
+	  statfs results taken from quota.
+
 config CUSE
 	tristate "Character device in Userpace support"
 	depends on FUSE_FS

@@ -20,6 +20,7 @@
 #include <net/ipv6.h>
 #include <net/inet_frag.h>
 
+#include <linux/netfilter_bridge.h>
 #include <linux/netfilter_ipv6.h>
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_helper.h>
@@ -187,6 +188,21 @@ out:
 	return nf_conntrack_confirm(skb);
 }
 
+static enum ip6_defrag_users nf_ct6_defrag_user(unsigned int hooknum,
+						struct sk_buff *skb)
+{
+#ifdef CONFIG_BRIDGE_NETFILTER
+	if (skb->nf_bridge &&
+	    skb->nf_bridge->mask & BRNF_NF_BRIDGE_PREROUTING)
+		return IP6_DEFRAG_CONNTRACK_BRIDGE_IN;
+#endif
+	if (hooknum == NF_INET_PRE_ROUTING)
+		return IP6_DEFRAG_CONNTRACK_IN;
+	else
+		return IP6_DEFRAG_CONNTRACK_OUT;
+
+}
+
 static unsigned int ipv6_defrag(unsigned int hooknum,
 				struct sk_buff *skb,
 				const struct net_device *in,
@@ -194,13 +210,13 @@ static unsigned int ipv6_defrag(unsigned int hooknum,
 				int (*okfn)(struct sk_buff *))
 {
 	struct sk_buff *reasm;
+	struct net *net = out ? dev_net(out) : dev_net(in);
 
 	/* Previously seen (loopback)?  */
 	if (skb->nfct)
 		return NF_ACCEPT;
 
-	reasm = nf_ct_frag6_gather(skb);
-
+	reasm = nf_ct_frag6_gather(net, skb, nf_ct6_defrag_user(hooknum, skb));
 	/* queued */
 	if (reasm == NULL)
 		return NF_STOLEN;

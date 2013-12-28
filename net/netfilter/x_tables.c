@@ -24,6 +24,8 @@
 #include <linux/mm.h>
 #include <net/net_namespace.h>
 
+#include <bc/kmem.h>
+
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter_arp.h>
 
@@ -65,6 +67,46 @@ static const char *const xt_prefix[NFPROTO_NUMPROTO] = {
 	[NFPROTO_BRIDGE] = "eb",
 	[NFPROTO_IPV6]   = "ip6",
 };
+
+#ifdef CONFIG_BEANCOUNTERS
+static inline struct user_beancounter *xt_table_ub(struct xt_table_info *info)
+{
+	struct user_beancounter *ub;
+
+	for (ub = mem_ub(info); ub->parent != NULL; ub = ub->parent);
+	return ub;
+}
+
+static void uncharge_xtables(struct xt_table_info *info, unsigned long size)
+{
+	struct user_beancounter *ub;
+
+	ub = xt_table_ub(info);
+	uncharge_beancounter(ub, UB_NUMXTENT, size);
+}
+
+static int recharge_xtables(int check_ub,
+		struct xt_table_info *new, struct xt_table_info *old)
+{
+	struct user_beancounter *ub;
+	long change;
+
+	ub = xt_table_ub(new);
+	BUG_ON(check_ub && ub != xt_table_ub(old));
+
+	change = (long)new->number - (long)old->number;
+	if (change > 0) {
+		if (charge_beancounter(ub, UB_NUMXTENT, change, UB_SOFT))
+			return -ENOMEM;
+	} else if (change < 0)
+		uncharge_beancounter(ub, UB_NUMXTENT, -change);
+
+	return 0;
+}
+#else
+#define recharge_xtables(c, new, old)	(0)
+#define uncharge_xtables(info, s)	do { } while (0)
+#endif	/* CONFIG_BEANCOUNTERS */
 
 /* Registration hooks for targets. */
 int
@@ -364,14 +406,14 @@ int xt_check_match(struct xt_mtchk_param *par,
 		 * ebt_among is exempt from centralized matchsize checking
 		 * because it uses a dynamic-size data set.
 		 */
-		pr_err("%s_tables: %s match: invalid size %Zu != %u\n",
+		ve_printk(VE_LOG, KERN_ERR "%s_tables: %s match: invalid size %Zu != %u\n",
 		       xt_prefix[par->family], par->match->name,
 		       XT_ALIGN(par->match->matchsize), size);
 		return -EINVAL;
 	}
 	if (par->match->table != NULL &&
 	    strcmp(par->match->table, par->table) != 0) {
-		pr_err("%s_tables: %s match: only valid in %s table, not %s\n",
+		ve_printk(VE_LOG, KERN_ERR "%s_tables: %s match: only valid in %s table, not %s\n",
 		       xt_prefix[par->family], par->match->name,
 		       par->match->table, par->table);
 		return -EINVAL;
@@ -379,7 +421,7 @@ int xt_check_match(struct xt_mtchk_param *par,
 	if (par->match->hooks && (par->hook_mask & ~par->match->hooks) != 0) {
 		char used[64], allow[64];
 
-		pr_err("%s_tables: %s match: used from hooks %s, but only "
+		ve_printk(VE_LOG, KERN_ERR "%s_tables: %s match: used from hooks %s, but only "
 		       "valid from %s\n",
 		       xt_prefix[par->family], par->match->name,
 		       textify_hooks(used, sizeof(used), par->hook_mask),
@@ -387,7 +429,7 @@ int xt_check_match(struct xt_mtchk_param *par,
 		return -EINVAL;
 	}
 	if (par->match->proto && (par->match->proto != proto || inv_proto)) {
-		pr_err("%s_tables: %s match: only valid for protocol %u\n",
+		ve_printk(VE_LOG, KERN_ERR "%s_tables: %s match: only valid for protocol %u\n",
 		       xt_prefix[par->family], par->match->name,
 		       par->match->proto);
 		return -EINVAL;
@@ -620,19 +662,19 @@ struct xt_table_info *xt_alloc_table_info(unsigned int size)
 	if ((SMP_ALIGN(size) >> PAGE_SHIFT) + 2 > totalram_pages)
 		return NULL;
 
-	newinfo = kzalloc(XT_TABLE_INFO_SZ, GFP_KERNEL);
+	newinfo = kzalloc(XT_TABLE_INFO_SZ, GFP_KERNEL_UBC);
 	if (!newinfo)
 		return NULL;
 
-	newinfo->size = size;
+	newinfo->alloc_size = newinfo->size = size;
 
 	for_each_possible_cpu(cpu) {
 		if (size <= PAGE_SIZE)
 			newinfo->entries[cpu] = kmalloc_node(size,
-							GFP_KERNEL,
+							GFP_KERNEL_UBC,
 							cpu_to_node(cpu));
 		else
-			newinfo->entries[cpu] = vmalloc_node(size,
+			newinfo->entries[cpu] = ub_vmalloc_node(size,
 							cpu_to_node(cpu));
 
 		if (newinfo->entries[cpu] == NULL) {
@@ -650,7 +692,7 @@ void xt_free_table_info(struct xt_table_info *info)
 	int cpu;
 
 	for_each_possible_cpu(cpu) {
-		if (info->size <= PAGE_SIZE)
+		if (info->alloc_size <= PAGE_SIZE)
 			kfree(info->entries[cpu]);
 		else
 			vfree(info->entries[cpu]);
@@ -718,6 +760,12 @@ xt_replace_table(struct xt_table *table,
 			 num_counters, private->number);
 		local_bh_enable();
 		*error = -EAGAIN;
+		return NULL;
+	}
+
+	if (recharge_xtables(num_counters != 0, newinfo, private)) {
+		local_bh_enable();
+		*error = -ENOMEM;
 		return NULL;
 	}
 
@@ -798,6 +846,7 @@ void *xt_unregister_table(struct xt_table *table)
 	list_del(&table->list);
 	mutex_unlock(&xt[table->af].mutex);
 	kfree(table);
+	uncharge_xtables(private, private->number);
 
 	return private;
 }

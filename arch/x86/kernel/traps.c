@@ -385,6 +385,13 @@ unknown_nmi_error(unsigned char reason, struct pt_regs *regs)
 	printk(KERN_EMERG "Dazed and confused, but trying to continue\n");
 }
 
+static int dummy_nmi_callback(struct pt_regs *regs, int cpu)
+{
+	return 0;
+}
+
+static nmi_callback_t nmi_ipi_callback = dummy_nmi_callback;
+
 static notrace __kprobes void default_do_nmi(struct pt_regs *regs)
 {
 	unsigned char reason = 0;
@@ -439,10 +446,22 @@ do_nmi(struct pt_regs *regs, long error_code)
 
 	inc_irq_stat(__nmi_count);
 
-	if (!ignore_nmis)
-		default_do_nmi(regs);
+	if (!ignore_nmis) {
+		if (!nmi_ipi_callback(regs, smp_processor_id()))
+			default_do_nmi(regs);
+	}
 
 	nmi_exit();
+}
+
+void set_nmi_ipi_callback(nmi_callback_t callback)
+{
+	nmi_ipi_callback = callback;
+}
+
+void unset_nmi_ipi_callback(void)
+{
+	nmi_ipi_callback = dummy_nmi_callback;
 }
 
 void stop_nmi(void)

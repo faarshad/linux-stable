@@ -28,7 +28,13 @@ static void br_pass_frame_up(struct net_bridge *br, struct sk_buff *skb)
 	brdev->stats.rx_bytes += skb->len;
 
 	indev = skb->dev;
-	skb->dev = brdev;
+	if (!br->via_phys_dev)
+		skb->dev = brdev;
+	else {
+		skb->brmark = BR_ALREADY_SEEN;
+		if (br->master_dev)
+			skb->dev = br->master_dev;
+	}
 
 	NF_HOOK(PF_BRIDGE, NF_BR_LOCAL_IN, skb, indev, NULL,
 		netif_receive_skb);
@@ -56,7 +62,7 @@ int br_handle_frame_finish(struct sk_buff *skb)
 	/* The packet skb2 goes to the local host (NULL to skip). */
 	skb2 = NULL;
 
-	if (br->dev->flags & IFF_PROMISC)
+	if ((br->dev->flags & IFF_PROMISC) && !br->via_phys_dev)
 		skb2 = skb;
 
 	dst = NULL;
@@ -147,6 +153,8 @@ struct sk_buff *br_handle_frame(struct net_bridge_port *p, struct sk_buff *skb)
 
 forward:
 	switch (p->state) {
+		struct net_device *out;
+
 	case BR_STATE_FORWARDING:
 		rhook = rcu_dereference(br_should_route_hook);
 		if (rhook != NULL) {
@@ -156,7 +164,12 @@ forward:
 		}
 		/* fall through */
 	case BR_STATE_LEARNING:
-		if (!compare_ether_addr(p->br->dev->dev_addr, dest))
+		if (skb->brmark == BR_ALREADY_SEEN)
+			return skb;
+
+		out = p->br->via_phys_dev ? p->br->master_dev : p->br->dev;
+
+		if (out && !compare_ether_addr(p->br->dev->dev_addr, dest))
 			skb->pkt_type = PACKET_HOST;
 
 		NF_HOOK(PF_BRIDGE, NF_BR_PRE_ROUTING, skb, skb->dev, NULL,

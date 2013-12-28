@@ -155,11 +155,14 @@ int nlmclnt_proc(struct nlm_host *host, int cmd, struct file_lock *fl)
 {
 	struct nlm_rqst		*call;
 	int			status;
+	struct ve_struct *ve;
 
 	nlm_get_host(host);
 	call = nlm_alloc_call(host);
 	if (call == NULL)
 		return -ENOMEM;
+
+	ve = set_exec_env(host->owner_env);
 
 	nlmclnt_locks_init_private(fl, host);
 	/* Set up the argument struct */
@@ -182,6 +185,7 @@ int nlmclnt_proc(struct nlm_host *host, int cmd, struct file_lock *fl)
 	unlock_kernel();
 
 	dprintk("lockd: clnt proc returns %d\n", status);
+	(void)set_exec_env(ve);
 	return status;
 }
 EXPORT_SYMBOL_GPL(nlmclnt_proc);

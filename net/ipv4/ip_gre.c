@@ -50,6 +50,9 @@
 #include <net/ip6_route.h>
 #endif
 
+#include <linux/cpt_image.h>
+#include <linux/cpt_export.h>
+
 /*
    Problems & solutions
    --------------------
@@ -1202,6 +1205,8 @@ static int ipgre_close(struct net_device *dev)
 
 #endif
 
+static void ipgre_cpt(struct net_device *dev,
+		struct cpt_ops *ops, struct cpt_context *ctx);
 static const struct net_device_ops ipgre_netdev_ops = {
 	.ndo_init		= ipgre_tunnel_init,
 	.ndo_uninit		= ipgre_tunnel_uninit,
@@ -1212,6 +1217,7 @@ static const struct net_device_ops ipgre_netdev_ops = {
 	.ndo_start_xmit		= ipgre_tunnel_xmit,
 	.ndo_do_ioctl		= ipgre_tunnel_ioctl,
 	.ndo_change_mtu		= ipgre_tunnel_change_mtu,
+	.ndo_cpt		= ipgre_cpt,
 };
 
 static void ipgre_tunnel_setup(struct net_device *dev)
@@ -1296,6 +1302,112 @@ static void ipgre_destroy_tunnels(struct ipgre_net *ign)
 		}
 	}
 }
+
+static void ipgre_cpt(struct net_device *dev,
+		struct cpt_ops *ops, struct cpt_context *ctx)
+{
+	struct cpt_tunnel_image v;
+	struct ip_tunnel *t;
+	struct ipgre_net *ign;
+
+	t = netdev_priv(dev);
+	ign = net_generic(get_exec_env()->ve_netns, ipgre_net_id);
+	BUG_ON(ign == NULL);
+
+	v.cpt_next = CPT_NULL;
+	v.cpt_object = CPT_OBJ_NET_IPIP_TUNNEL;
+	v.cpt_hdrlen = sizeof(v);
+	v.cpt_content = CPT_CONTENT_VOID;
+
+	/* mark fb dev */
+	v.cpt_tnl_flags = CPT_TUNNEL_GRE;
+	if (dev == ign->fb_tunnel_dev)
+		v.cpt_tnl_flags |= CPT_TUNNEL_FBDEV;
+
+	v.cpt_i_flags = t->parms.i_flags;
+	v.cpt_o_flags = t->parms.o_flags;
+	v.cpt_i_key = t->parms.i_key;
+	v.cpt_o_key = t->parms.o_key;
+	v.cpt_i_seqno = t->i_seqno;
+	v.cpt_o_seqno = t->o_seqno;
+
+	BUILD_BUG_ON(sizeof(v.cpt_iphdr) != sizeof(t->parms.iph));
+	memcpy(&v.cpt_iphdr, &t->parms.iph, sizeof(t->parms.iph));
+
+	ops->write(&v, sizeof(v), ctx);
+}
+
+static int ipgre_rst(loff_t start, struct cpt_netdev_image *di,
+		struct rst_ops *ops, struct cpt_context *ctx)
+{
+	int err = -ENODEV;
+	struct cpt_tunnel_image v;
+	struct net_device *dev;
+	struct ip_tunnel *t;
+	loff_t pos;
+	int fbdev;
+	struct ipgre_net *ign;
+
+	ign = net_generic(get_exec_env()->ve_netns, ipgre_net_id);
+	if (ign == NULL)
+		return -EOPNOTSUPP;
+
+	pos = start + di->cpt_hdrlen;
+	err = ops->get_object(CPT_OBJ_NET_IPIP_TUNNEL,
+			pos, &v, sizeof(v), ctx);
+	if (err)
+		return err;
+
+	/* some sanity */
+	if (v.cpt_content != CPT_CONTENT_VOID)
+		return -EINVAL;
+
+	if (!(v.cpt_tnl_flags & CPT_TUNNEL_GRE))
+		return 1;
+
+	if (v.cpt_tnl_flags & CPT_TUNNEL_FBDEV) {
+		fbdev = 1;
+		err = 0;
+		dev = ign->fb_tunnel_dev;
+	} else {
+		fbdev = 0;
+		err = -ENOMEM;
+		dev = alloc_netdev(sizeof(struct ip_tunnel), di->cpt_name,
+				ipgre_tunnel_setup);
+		if (!dev)
+			goto out;
+	}
+
+	t = netdev_priv(dev);
+	t->parms.i_flags = v.cpt_i_flags;
+	t->parms.o_flags = v.cpt_o_flags;
+	t->parms.i_key = v.cpt_i_key;
+	t->parms.o_key = v.cpt_o_key;
+	t->i_seqno = v.cpt_i_seqno;
+	t->o_seqno = v.cpt_o_seqno;
+
+	BUILD_BUG_ON(sizeof(v.cpt_iphdr) != sizeof(t->parms.iph));
+	memcpy(&t->parms.iph, &v.cpt_iphdr, sizeof(t->parms.iph));
+
+	if (!fbdev) {
+		ipgre_tunnel_init(dev);
+		err = register_netdevice(dev);
+		if (err) {
+			free_netdev(dev);
+			goto out;
+		}
+
+		dev_hold(dev);
+		ipgre_tunnel_link(ign, t);
+	}
+out:
+	return err;
+}
+
+static struct netdev_rst ipgre_netdev_rst = {
+	.cpt_object = CPT_OBJ_NET_IPIP_TUNNEL,
+	.ndo_rst = ipgre_rst,
+};
 
 static int ipgre_init_net(struct net *net)
 {
@@ -1682,6 +1794,7 @@ static int __init ipgre_init(void)
 	if (err < 0)
 		goto tap_ops_failed;
 
+	register_netdev_rst(&ipgre_netdev_rst);
 out:
 	return err;
 
@@ -1696,6 +1809,7 @@ gen_device_failed:
 
 static void __exit ipgre_fini(void)
 {
+	unregister_netdev_rst(&ipgre_netdev_rst);
 	rtnl_link_unregister(&ipgre_tap_ops);
 	rtnl_link_unregister(&ipgre_link_ops);
 	unregister_pernet_gen_device(ipgre_net_id, &ipgre_net_ops);

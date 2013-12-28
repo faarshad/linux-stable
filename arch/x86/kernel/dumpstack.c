@@ -303,6 +303,21 @@ void die(const char *str, struct pt_regs *regs, long err)
 	oops_end(flags, regs, sig);
 }
 
+/*
+ * Voyager doesn't implement these
+ */
+void __attribute__((weak)) smp_show_regs(struct pt_regs *regs, void *info)
+{
+}
+
+#ifdef CONFIG_SMP
+int __attribute__((weak))
+smp_nmi_call_function(smp_nmi_function func, void *info, int wait)
+{
+	return 0;
+}
+#endif
+
 void notrace __kprobes
 die_nmi(char *str, struct pt_regs *regs, int do_panic)
 {
@@ -319,6 +334,7 @@ die_nmi(char *str, struct pt_regs *regs, int do_panic)
 	printk(KERN_EMERG "%s", str);
 	printk(" on CPU%d, ip %08lx, registers:\n",
 		smp_processor_id(), regs->ip);
+	smp_nmi_call_function(smp_show_regs, NULL, 1);
 	show_registers(regs);
 	oops_end(flags, regs, 0);
 	if (do_panic || panic_on_oops)

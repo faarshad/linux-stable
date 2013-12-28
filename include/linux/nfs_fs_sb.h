@@ -91,6 +91,7 @@ struct nfs_client {
 #ifdef CONFIG_NFS_FSCACHE
 	struct fscache_cookie	*fscache;	/* client index cache cookie */
 #endif
+	struct ve_struct	*owner_env;
 };
 
 /*

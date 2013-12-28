@@ -22,6 +22,62 @@
 #define arch_idle_time(cpu) 0
 #endif
 
+static int show_stat_ve(struct seq_file *p, struct ve_struct *ve, unsigned long jif)
+{
+	int i;
+	u64 user, nice, system;
+	cycles_t idle, iowait;
+	cpumask_t ve_cpus;
+
+	ve_cpu_online_map(ve, &ve_cpus);
+
+	user = nice = system = idle = iowait = 0;
+	for_each_cpu_mask(i, ve_cpus) {
+		user += VE_CPU_STATS(ve, i)->user;
+		nice += VE_CPU_STATS(ve, i)->nice;
+		system += VE_CPU_STATS(ve, i)->system;
+		idle += ve_sched_get_idle_time(ve, i);
+		iowait += ve_sched_get_iowait_time(ve, i);
+	}
+
+	seq_printf(p, "cpu  %llu %llu %llu %llu %llu 0 0 0\n",
+		(unsigned long long)cputime64_to_clock_t(user),
+		(unsigned long long)cputime64_to_clock_t(nice),
+		(unsigned long long)cputime64_to_clock_t(system),
+		(unsigned long long)cycles_to_clocks(idle),
+		(unsigned long long)cycles_to_clocks(iowait));
+
+	for_each_cpu_mask(i, ve_cpus) {
+		user = VE_CPU_STATS(ve, i)->user;
+		nice = VE_CPU_STATS(ve, i)->nice;
+		system = VE_CPU_STATS(ve, i)->system;
+		idle = ve_sched_get_idle_time(ve, i);
+		iowait = ve_sched_get_iowait_time(ve, i);
+		seq_printf(p, "cpu%d %llu %llu %llu %llu %llu 0 0 0\n",
+			i,
+			(unsigned long long)cputime64_to_clock_t(user),
+			(unsigned long long)cputime64_to_clock_t(nice),
+			(unsigned long long)cputime64_to_clock_t(system),
+			(unsigned long long)cycles_to_clocks(idle),
+			(unsigned long long)cycles_to_clocks(iowait));
+	}
+	seq_printf(p, "intr 0\nswap 0 0\n");
+
+	seq_printf(p,
+		"\nctxt %llu\n"
+		"btime %lu\n"
+		"processes %lu\n"
+		"procs_running %lu\n"
+		"procs_blocked %lu\n",
+		nr_context_switches(),
+		(unsigned long)jif + ve->start_timespec.tv_sec,
+		total_forks,
+		nr_running_ve(ve),
+		nr_iowait_ve(ve));
+
+	return 0;
+}
+
 static int show_stat(struct seq_file *p, void *v)
 {
 	int i, j;
@@ -33,12 +89,18 @@ static int show_stat(struct seq_file *p, void *v)
 	unsigned int per_softirq_sums[NR_SOFTIRQS] = {0};
 	struct timespec boottime;
 	unsigned int per_irq_sum;
+	struct ve_struct *ve;
+
+	getboottime(&boottime);
+	jif = boottime.tv_sec;
+
+	ve = get_exec_env();
+	if (!ve_is_super(ve))
+		return show_stat_ve(p, ve, jif);
 
 	user = nice = system = idle = iowait =
 		irq = softirq = steal = cputime64_zero;
 	guest = cputime64_zero;
-	getboottime(&boottime);
-	jif = boottime.tv_sec;
 
 	for_each_possible_cpu(i) {
 		user = cputime64_add(user, kstat_cpu(i).cpustat.user);
@@ -166,7 +228,7 @@ static const struct file_operations proc_stat_operations = {
 
 static int __init proc_stat_init(void)
 {
-	proc_create("stat", 0, NULL, &proc_stat_operations);
+	proc_create("stat", 0, &glob_proc_root, &proc_stat_operations);
 	return 0;
 }
 module_init(proc_stat_init);

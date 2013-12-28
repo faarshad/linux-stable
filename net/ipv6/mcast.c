@@ -243,6 +243,7 @@ int ipv6_sock_mc_join(struct sock *sk, int ifindex, const struct in6_addr *addr)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(ipv6_sock_mc_join);
 
 /*
  *	socket leave on multicast group
@@ -2205,15 +2206,18 @@ static void igmp6_leave_group(struct ifmcaddr6 *ma)
 static void mld_gq_timer_expire(unsigned long data)
 {
 	struct inet6_dev *idev = (struct inet6_dev *)data;
+	struct ve_struct *old_env = set_exec_env(idev->dev->owner_env);
 
 	idev->mc_gq_running = 0;
 	mld_send_report(idev, NULL);
 	__in6_dev_put(idev);
+	set_exec_env(old_env);
 }
 
 static void mld_ifc_timer_expire(unsigned long data)
 {
 	struct inet6_dev *idev = (struct inet6_dev *)data;
+	struct ve_struct *old_env = set_exec_env(idev->dev->owner_env);
 
 	mld_send_cr(idev);
 	if (idev->mc_ifc_count) {
@@ -2222,6 +2226,7 @@ static void mld_ifc_timer_expire(unsigned long data)
 			mld_ifc_start_timer(idev, idev->mc_maxdelay);
 	}
 	__in6_dev_put(idev);
+	set_exec_env(old_env);
 }
 
 static void mld_ifc_event(struct inet6_dev *idev)
@@ -2236,6 +2241,7 @@ static void mld_ifc_event(struct inet6_dev *idev)
 static void igmp6_timer_handler(unsigned long data)
 {
 	struct ifmcaddr6 *ma = (struct ifmcaddr6 *) data;
+	struct ve_struct *old_env = set_exec_env(ma->idev->dev->owner_env);
 
 	if (MLD_V1_SEEN(ma->idev))
 		igmp6_send(&ma->mca_addr, ma->idev->dev, ICMPV6_MGM_REPORT);
@@ -2247,6 +2253,7 @@ static void igmp6_timer_handler(unsigned long data)
 	ma->mca_flags &= ~MAF_TIMER_RUNNING;
 	spin_unlock(&ma->mca_lock);
 	ma_put(ma);
+	set_exec_env(old_env);
 }
 
 /* Device changing type */

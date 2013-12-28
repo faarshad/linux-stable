@@ -213,8 +213,16 @@ struct class_dev_iter {
 	const struct device_type	*type;
 };
 
+#ifndef CONFIG_VE
 extern struct kobject *sysfs_dev_block_kobj;
 extern struct kobject *sysfs_dev_char_kobj;
+#define ve_sysfs_dev_block_kobj sysfs_dev_block_kobj
+#define ve_sysfs_dev_char_kobj sysfs_dev_char_kobj
+#else
+#define ve_sysfs_dev_block_kobj (get_exec_env()->dev_block_kobj)
+#define ve_sysfs_dev_char_kobj (get_exec_env()->dev_char_kobj)
+#endif
+
 extern int __must_check __class_register(struct class *class,
 					 struct lock_class_key *key);
 extern void class_unregister(struct class *class);
@@ -278,6 +286,15 @@ extern struct class * __must_check __class_create(struct module *owner,
 						  const char *name,
 						  struct lock_class_key *key);
 extern void class_destroy(struct class *cls);
+
+extern struct class net_class;
+extern struct kset *class_kset;
+
+int classes_init(void);
+void classes_fini(void);
+
+int devices_init(void);
+void devices_fini(void);
 
 /* This is a #define to keep the compiler from merging different
  * instances of the __key variable */
