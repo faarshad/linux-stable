@@ -148,9 +148,10 @@ Install systemtap from source
 1. In /usr/src/ run: `git clone https://github.com/faarshad/linux-stable.git`  
    `chmod -R a-s linux-stable `
 2. `git checkout v2.6.32-openvz-2.6.32-afanasyev.1-utrace-fche-2.6.32`
-3. `make-kpkg --initrd --append-to-version -openvz-utrace --revision=1 kernel_image kernel_headers kernel_debug`
-4. 	`dpkg -i ../linux-image-2.6.32.28-openvz-utrace_1_amd64.deb`  
+3. `cp config .config`
+4. `make-kpkg --initrd --append-to-version -openvz-utrace --revision=1 kernel_image kernel_headers kernel_debug`
+5. 	`dpkg -i ../linux-image-2.6.32.28-openvz-utrace_1_amd64.deb`  
 	`dpkg -i ../linux-headers-2.6.32.28-openvz-utrace_1_amd64.deb`  
    	`dpkg -i ../linux-image-2.6.32.28-openvz-utrace-dbg_1_amd64.deb` 
    	
-5. Install systemtap from source.
+6. Install systemtap from source.
