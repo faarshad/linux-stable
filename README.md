@@ -28,7 +28,7 @@ Commit
 	# git log -1 --pretty=oneline
 	ec66872ce417a13f617479b98624c963aa561639 openvz patch applied to v2.6.32
 	
-###Download and apply utrace patches. Resolve merge conflicts manually.
+###Download and apply utrace patches. Resolve merge conflicts manually (using `kernel/ptrace.c.rej`).
 
 Download
 
