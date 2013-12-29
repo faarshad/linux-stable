@@ -153,5 +153,5 @@ Install systemtap from source
 5. 	`dpkg -i ../linux-image-2.6.32.28-openvz-utrace_1_amd64.deb`  
 	`dpkg -i ../linux-headers-2.6.32.28-openvz-utrace_1_amd64.deb`  
    	`dpkg -i ../linux-image-2.6.32.28-openvz-utrace-dbg_1_amd64.deb` 
-   	
-6. Install systemtap from source.
+6. Reboot in the new kernel.   	
+7. Install systemtap from source.
