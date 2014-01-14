@@ -156,9 +156,9 @@ Install systemtap from source
 6. Reboot in the new kernel.   	
 7. Install systemtap from source.
 
-	$git clone git://sourceware.org/git/systemtap.git
-	$cd systemtap
-	$git checkout release-2.4
-	$patch -p0 < "PATH-TO stap-release-2.4-0-gaa7b1e0-openvz-patch-for-2.6.32-kernel"
-	$./configure
-	$make && make install
+	$git clone git://sourceware.org/git/systemtap.git  
+	$cd systemtap  
+	$git checkout release-2.4  
+	$patch -p0 < "PATH-TO stap-release-2.4-0-gaa7b1e0-openvz-patch-for-2.6.32-kernel"  
+	$./configure  
+	$make && make install  
