@@ -1,0 +1,58 @@
+diff --git runtime/linux/task_finder.c runtime/linux/task_finder.c
+index a3cc3fb..d413e17 100644
+--- runtime/linux/task_finder.c
++++ runtime/linux/task_finder.c
+@@ -385,7 +385,7 @@ stap_utrace_detach_ops(struct utrace_engine_ops *ops)
+ 	// it had an mm.
+ 
+ 	rcu_read_lock();
+-	do_each_thread(grp, tsk) {
++	do_each_thread_all(grp, tsk) {
+ #ifdef PF_KTHREAD
+ 		// Ignore kernel threads.  On systems without
+ 		// PF_KTHREAD, we're ok, since kernel threads won't be
+@@ -403,7 +403,7 @@ stap_utrace_detach_ops(struct utrace_engine_ops *ops)
+ 		if (rc != 0)
+ 			_stp_error("stap_utrace_detach returned error %d on pid %d", rc, tsk->pid);
+ 		WARN_ON(rc != 0);
+-	} while_each_thread(grp, tsk);
++	} while_each_thread_all(grp, tsk);
+ 	rcu_read_unlock();
+ 	debug_task_finder_report();
+ }
+@@ -1587,7 +1587,7 @@ stap_start_task_finder(void)
+ 	atomic_set(&__stp_task_finder_state, __STP_TF_RUNNING);
+ 
+ 	rcu_read_lock();
+-	do_each_thread(grp, tsk) {
++	do_each_thread_all(grp, tsk) {
+ 		struct mm_struct *mm;
+ 		char *mmpath;
+ 		size_t mmpathlen;
+@@ -1693,7 +1693,7 @@ stap_start_task_finder(void)
+ 			rc = 0;		/* ignore EPERM */
+ 			tgt->engine_attached = 1;
+ 		}
+-	} while_each_thread(grp, tsk);
++	} while_each_thread_all(grp, tsk);
+ stf_err:
+ 	rcu_read_unlock();
+ 	_stp_kfree(mmpath_buf);
+@@ -1715,7 +1715,7 @@ stap_task_finder_post_init(void)
+ 	}
+ 
+ 	rcu_read_lock();
+-	do_each_thread(grp, tsk) {
++	do_each_thread_all(grp, tsk) {
+ 		struct list_head *tgt_node;
+ 
+ 		/* If in stap -c/-x mode, skip over other processes. */
+@@ -1762,7 +1762,7 @@ stap_task_finder_post_init(void)
+ 				break;
+ 			}
+ 		}
+-	} while_each_thread(grp, tsk);
++	} while_each_thread_all(grp, tsk);
+ 	rcu_read_unlock();
+ #endif
+ 	return;
